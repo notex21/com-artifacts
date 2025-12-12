@@ -1,69 +1,62 @@
 const MODULE_ID = "com-artifacts";
 
-/* -------------------- Client-side selection (persisted per-user) -------------------- */
+/* -------------------- Client-side selection (per-user, persisted) -------------------- */
+
 /**
- * In-memory cache (per client)
+ * In-memory cache (fast), backed by game.user flags (stable across refresh).
  * Map<actorId, Set<string>>
  */
 globalThis.comArtifactsSelection ??= new Map();
 
-/**
- * User flag shape:
- * game.user flag MODULE_ID, key "selection" => { [actorId]: string[] }
- */
-function _getUserSelectionObject() {
+/** Read selection for this user+actor from user flag (object map) */
+function loadSelectionFromUserFlag(actorId) {
   try {
-    const val = game.user.getFlag(MODULE_ID, "selection");
-    if (val && typeof val === "object") return val;
-  } catch (_) {}
-  return {};
+    const all = game.user.getFlag(MODULE_ID, "selection") ?? {};
+    const arr = Array.isArray(all?.[actorId]) ? all[actorId] : [];
+    return new Set(arr.filter(Boolean));
+  } catch (e) {
+    console.warn(`${MODULE_ID} | failed to read selection flag`, e);
+    return new Set();
+  }
 }
 
-async function _writeUserSelectionObject(obj) {
-  // IMPORTANT: setFlag returns a Promise; no .catch on getFlag needed.
-  return game.user.setFlag(MODULE_ID, "selection", obj);
-}
-
-async function _persistSelection(actorId) {
-  const obj = _getUserSelectionObject();
-  const set = globalThis.comArtifactsSelection.get(actorId) ?? new Set();
-  obj[actorId] = Array.from(set);
-  await _writeUserSelectionObject(obj);
-}
-
-function _rehydrateSelectionFromUserFlag(actorId) {
-  const obj = _getUserSelectionObject();
-  const arr = Array.isArray(obj?.[actorId]) ? obj[actorId] : [];
-  globalThis.comArtifactsSelection.set(actorId, new Set(arr));
-  return globalThis.comArtifactsSelection.get(actorId);
+/** Save selection for this user+actor into user flag (object map) */
+let _selSaveTimer = null;
+function scheduleSaveSelection(actorId) {
+  // debounce to avoid spamming setFlag while clicking
+  if (_selSaveTimer) clearTimeout(_selSaveTimer);
+  _selSaveTimer = setTimeout(async () => {
+    try {
+      const all = game.user.getFlag(MODULE_ID, "selection") ?? {};
+      const set = globalThis.comArtifactsSelection.get(actorId) ?? new Set();
+      all[actorId] = Array.from(set);
+      await game.user.setFlag(MODULE_ID, "selection", all);
+    } catch (e) {
+      console.warn(`${MODULE_ID} | failed to save selection flag`, e);
+    }
+  }, 150);
 }
 
 function getSel(actorId) {
   if (!globalThis.comArtifactsSelection.has(actorId)) {
-    // Try to load persisted selection first
-    _rehydrateSelectionFromUserFlag(actorId);
-  }
-  if (!globalThis.comArtifactsSelection.has(actorId)) {
-    globalThis.comArtifactsSelection.set(actorId, new Set());
+    // hydrate from user flag
+    globalThis.comArtifactsSelection.set(actorId, loadSelectionFromUserFlag(actorId));
   }
   return globalThis.comArtifactsSelection.get(actorId);
 }
 
-async function toggleSel(actorId, key) {
+function toggleSel(actorId, key) {
   const s = getSel(actorId);
   if (s.has(key)) s.delete(key);
   else s.add(key);
-
-  // Persist immediately so refresh/login doesn’t break it
-  await _persistSelection(actorId);
+  scheduleSaveSelection(actorId);
   return s;
 }
 
-async function clearSel(actorId) {
+function clearSel(actorId) {
   globalThis.comArtifactsSelection.delete(actorId);
-  const obj = _getUserSelectionObject();
-  delete obj[actorId];
-  await _writeUserSelectionObject(obj);
+  // also clear persisted
+  scheduleSaveSelection(actorId);
 }
 
 /* -------------------- Storage -------------------- */
@@ -158,7 +151,6 @@ function setArtifactsEditable(html, editable) {
     });
   }
 
-  // Tag picking stays active even when locked
   tab.find(".com-tag-pick").css("pointer-events", "auto");
   tab.css("opacity", editable ? "" : "0.85");
 }
@@ -185,13 +177,8 @@ function installLockObserver(app, html) {
 /* -------------------- Sheet UI: Add "Artifacts" tab -------------------- */
 
 function ensureArtifactsTab(app, html, actor) {
-  // CHANGE: allow LIMITED+ to see/use (select), but only OWNER can edit.
-  const canView = actor?.testUserPermission(game.user, "LIMITED");
-  if (!canView) return;
+  if (!actor?.testUserPermission(game.user, "OWNER")) return;
 
-  const canEdit = actor?.testUserPermission(game.user, "OWNER");
-
-  // Inject minimal CSS once
   if (!document.getElementById("com-artifacts-inline-style")) {
     const style = document.createElement("style");
     style.id = "com-artifacts-inline-style";
@@ -217,13 +204,9 @@ function ensureArtifactsTab(app, html, actor) {
       .com-edit-tag{
         background:none !important;
         border:none !important;
-        width:14px !important;
-        min-width:14px !important;
-        max-width:14px !important;
-        height:14px !important;
-        min-height:14px !important;
-        padding:0 !important;
-        margin:0 !important;
+        width:14px !important; min-width:14px !important; max-width:14px !important;
+        height:14px !important; min-height:14px !important;
+        padding:0 !important; margin:0 !important;
         display:inline-flex !important;
         align-items:center !important;
         justify-content:center !important;
@@ -323,9 +306,7 @@ function ensureArtifactsTab(app, html, actor) {
   function cancelInlineEdit($row) {
     const $pick = $row.find(".com-tag-pick");
     const $store = $row.find("input.com-hidden-store");
-
     $pick.text(($store.val() ?? "").trim());
-
     const el = $pick[0];
     el.contentEditable = "false";
     $pick.removeClass("com-editing");
@@ -334,12 +315,9 @@ function ensureArtifactsTab(app, html, actor) {
   function commitInlineEdit($row) {
     const $pick = $row.find(".com-tag-pick");
     const $store = $row.find("input.com-hidden-store");
-
     const newVal = (($pick.text() ?? "").trim());
-
     $store.val(newVal);
     $store.trigger("change");
-
     const el = $pick[0];
     el.contentEditable = "false";
     $pick.removeClass("com-editing");
@@ -422,26 +400,27 @@ function ensureArtifactsTab(app, html, actor) {
 
     grid.html(artifacts.map(renderSlot).join(""));
 
-    // Rehydrate selection and apply highlight
+    // Restore highlight state (from persisted selection)
     const s = getSel(actor.id);
     grid.find(".com-tag-pick").each((_, el) => {
       const key = el.dataset.pick;
       if (s.has(key)) $(el).addClass("com-picked");
     });
 
-    // Click-to-highlight (persisted)
-    grid.off("click.comArtifactsPick").on("click.comArtifactsPick", ".com-tag-pick", async (ev) => {
+    // Click-to-highlight (NO actor writes)
+    grid.off("click.comArtifactsPick").on("click.comArtifactsPick", ".com-tag-pick", (ev) => {
       if ($(ev.currentTarget).hasClass("com-editing")) return;
       const key = ev.currentTarget.dataset.pick;
-      const set = await toggleSel(actor.id, key);
+      const set = toggleSel(actor.id, key);
       $(ev.currentTarget).toggleClass("com-picked", set.has(key));
     });
 
-    // Inline edit buttons only if OWNER/editable
+    // Edit button: inline edit the label itself
     grid.off("click.comArtifactsEdit").on("click.comArtifactsEdit", ".com-edit-tag", (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
-      const editable = canEdit && isSheetEditable(html);
+
+      const editable = isSheetEditable(html);
       if (!editable) return;
 
       const $row = $(ev.currentTarget).closest(".tag-row");
@@ -449,6 +428,7 @@ function ensureArtifactsTab(app, html, actor) {
       syncTagRowUI($row, true);
     });
 
+    // Key handling while editing
     grid.off("keydown.comArtifactsInline").on("keydown.comArtifactsInline", ".com-tag-pick.com-editing", (ev) => {
       const $row = $(ev.currentTarget).closest(".tag-row");
 
@@ -456,7 +436,7 @@ function ensureArtifactsTab(app, html, actor) {
         ev.preventDefault();
         ev.stopPropagation();
         commitInlineEdit($row);
-        const editable = canEdit && isSheetEditable(html);
+        const editable = isSheetEditable(html);
         syncTagRowUI($row, editable);
         return;
       }
@@ -465,23 +445,22 @@ function ensureArtifactsTab(app, html, actor) {
         ev.preventDefault();
         ev.stopPropagation();
         cancelInlineEdit($row);
-        const editable = canEdit && isSheetEditable(html);
+        const editable = isSheetEditable(html);
         syncTagRowUI($row, editable);
         return;
       }
     });
 
+    // Blur saves
     grid.off("blur.comArtifactsInline").on("blur.comArtifactsInline", ".com-tag-pick.com-editing", (ev) => {
       const $row = $(ev.currentTarget).closest(".tag-row");
       commitInlineEdit($row);
-      const editable = canEdit && isSheetEditable(html);
+      const editable = isSheetEditable(html);
       syncTagRowUI($row, editable);
     });
 
-    // Save changes (ONLY if OWNER)
+    // Save changes (artifact name + hidden tag storage)
     grid.off("change.comArtifacts").on("change.comArtifacts", "input", async (ev) => {
-      if (!canEdit) return;
-
       const tab = getActiveTab(html) || MODULE_ID;
       app._comLastTab = tab;
 
@@ -498,6 +477,7 @@ function ensureArtifactsTab(app, html, actor) {
 
       ref[lastKey] = ev.currentTarget.value;
 
+      // Update visible clickable label immediately (for tag edits)
       const $section = $(section);
       if (field === "power.0.name") $section.find(`.com-tag-pick[data-pick="a${idx}.p0"]`).text(ev.currentTarget.value.trim());
       if (field === "power.1.name") $section.find(`.com-tag-pick[data-pick="a${idx}.p1"]`).text(ev.currentTarget.value.trim());
@@ -506,15 +486,13 @@ function ensureArtifactsTab(app, html, actor) {
       await setArtifacts(actor, artifacts2);
       forceActivateTab(app, app._comLastTab);
 
-      const editable = canEdit && isSheetEditable(html);
+      const editable = isSheetEditable(html);
       $section.find(".tag-row").each((_, rowEl) => syncTagRowUI($(rowEl), editable));
       setArtifactsEditable(html, editable);
     });
 
-    // Image pick/clear (ONLY if OWNER)
+    // Image pick/clear
     grid.off("click.comArtifacts").on("click.comArtifacts", ".com-pick-img", async (ev) => {
-      if (!canEdit) return;
-
       const tab = getActiveTab(html) || MODULE_ID;
       app._comLastTab = tab;
 
@@ -535,8 +513,6 @@ function ensureArtifactsTab(app, html, actor) {
     });
 
     grid.on("click.comArtifacts", ".com-clear-img", async (ev) => {
-      if (!canEdit) return;
-
       const tab = getActiveTab(html) || MODULE_ID;
       app._comLastTab = tab;
 
@@ -549,8 +525,7 @@ function ensureArtifactsTab(app, html, actor) {
       forceActivateTab(app, app._comLastTab);
     });
 
-    // Apply lock state (editability)
-    const editable = canEdit && isSheetEditable(html);
+    const editable = isSheetEditable(html);
     setArtifactsEditable(html, editable);
     installLockObserver(app, html);
 
@@ -562,95 +537,101 @@ Hooks.on("renderActorSheet", (app, html) => {
   const actor = app?.actor;
   if (!actor) return;
 
-  const tab = getActiveTab(html);
+  const $html = html?.jquery ? html : $(html);
+
+  const tab = getActiveTab($html);
   if (tab) app._comLastTab = tab;
 
-  ensureArtifactsTab(app, html, actor);
+  ensureArtifactsTab(app, $html, actor);
 
   forceActivateTab(app, app._comLastTab);
 
-  const editable = actor.testUserPermission(game.user, "OWNER") && isSheetEditable(html);
-  setArtifactsEditable(html, editable);
-  installLockObserver(app, html);
+  const editable = isSheetEditable($html);
+  setArtifactsEditable($html, editable);
+  installLockObserver(app, $html);
 });
 
-/* -------------------- RollDialog: show highlighted artifact tags for approval -------------------- */
+/* -------------------- RollDialog injection (robust, no ui.windows dependency) -------------------- */
 
-function findCustomModifierInput(html) {
-  const labels = html.find("label");
+function findCustomModifierInput($root) {
+  // Prefer label match
+  const labels = $root.find("label").toArray();
   for (const el of labels) {
     const txt = (el.textContent ?? "").trim().toLowerCase();
     if (txt === "custom modifier") {
-      const input = $(el).closest(".form-group, .form-fields, div").find("input").first();
-      if (input?.length) return input;
+      // common CoM layout: label then input in same container
+      const $wrap = $(el).closest("div");
+      const $input = $wrap.find("input").first();
+      if ($input.length) return $input;
     }
   }
 
-  const inputs = html.find("input");
-  for (const el of inputs) {
-    const $el = $(el);
-    const ph = ($el.attr("placeholder") ?? "").toLowerCase();
-    const aria = ($el.attr("aria-label") ?? "").toLowerCase();
-    if (ph.includes("modifier") || aria.includes("modifier")) return $el;
-  }
+  // Fallback: first visible text/number input in dialog
+  const $cand = $root.find('input[type="number"], input[type="text"]').filter((_, i) => i.offsetParent !== null).first();
+  return $cand.length ? $cand : null;
+}
 
-  const any = html.find('input[type="number"], input[type="text"]').first();
-  return any?.length ? any : null;
+function buildSelectedEntries(artifacts, selSet) {
+  const out = [];
+  for (let a = 0; a < 2; a++) {
+    const art = artifacts[a];
+
+    if (selSet.has(`a${a}.p0`) && (art.power?.[0]?.name ?? "").trim())
+      out.push({ label: art.power[0].name, mod: +1 });
+
+    if (selSet.has(`a${a}.p1`) && (art.power?.[1]?.name ?? "").trim())
+      out.push({ label: art.power[1].name, mod: +1 });
+
+    if (selSet.has(`a${a}.w`) && (art.weakness?.name ?? "").trim())
+      out.push({ label: art.weakness.name, mod: -1 });
+  }
+  return out;
 }
 
 Hooks.on("renderRollDialog", async (app, html) => {
   try {
+    // Some CoM refresh cycles can pass odd html; fall back to app.element.
+    const $root =
+      html?.jquery ? html :
+      html ? $(html) :
+      app?.element ? (app.element.jquery ? app.element : $(app.element)) :
+      null;
+
+    if (!$root || !$root.length) return;
+
     const actor =
       app.actor ??
       app.options?.actor ??
       (app.options?.actorId ? game.actors.get(app.options.actorId) : null) ??
-      canvas?.tokens?.controlled?.[0]?.actor ??
-      game.user.character ??
-      null;
+      game.user.character;
 
     if (!actor) return;
 
-    const artifacts = await getArtifacts(actor);
+    // Avoid double-inject
+    if ($root.find(".com-artifacts-roll").length) return;
 
-    // IMPORTANT: if in-memory selection is empty (refresh/login), rehydrate from user flag
-    let sel = getSel(actor.id);
-    if (!sel || sel.size === 0) {
-      sel = _rehydrateSelectionFromUserFlag(actor.id);
-    }
+    const $modInput = findCustomModifierInput($root);
+    if (!$modInput || !$modInput.length) return;
 
-    const form = html.find("form");
-    if (!form.length) return;
-
-    if (form.find(".com-artifacts-roll").length) return;
-
-    const modInput = findCustomModifierInput(html);
-    if (!modInput || !modInput.length) return;
-
+    // Base modifier capture (per dialog instance)
     if (!Number.isFinite(app._comArtifactsBaseMod)) {
-      const base = Number(modInput.val() ?? 0);
+      const base = Number($modInput.val() ?? 0);
       app._comArtifactsBaseMod = Number.isFinite(base) ? base : 0;
     }
 
-    function selectedEntries() {
-      const out = [];
-      for (let a = 0; a < 2; a++) {
-        const art = artifacts[a];
+    const artifacts = await getArtifacts(actor);
 
-        if (sel.has(`a${a}.p0`) && (art.power?.[0]?.name ?? "").trim())
-          out.push({ label: art.power[0].name, mod: +1 });
+    // IMPORTANT: selection must come from THIS USER (persisted), not GM.
+    // getSel() hydrates from user flag, so it survives refresh.
+    const sel = getSel(actor.id);
 
-        if (sel.has(`a${a}.p1`) && (art.power?.[1]?.name ?? "").trim())
-          out.push({ label: art.power[1].name, mod: +1 });
+    const entries = buildSelectedEntries(artifacts, sel);
 
-        if (sel.has(`a${a}.w`) && (art.weakness?.name ?? "").trim())
-          out.push({ label: art.weakness.name, mod: -1 });
-      }
-      return out;
-    }
+    // Where to insert: prefer form if it exists, else insert into dialog content.
+    const $form = $root.find("form").first();
+    const $mount = $form.length ? $form : $root;
 
-    const entries = selectedEntries();
-
-    const panel = $(`
+    const $panel = $(`
       <fieldset class="com-artifacts-roll" style="margin-top:10px; padding:8px; border:1px solid var(--color-border-light-primary); border-radius:6px;">
         <legend>Artifacts</legend>
 
@@ -675,28 +656,28 @@ Hooks.on("renderRollDialog", async (app, html) => {
       </fieldset>
     `);
 
-    form.append(panel);
+    $mount.append($panel);
 
     function recomputeAndApply() {
       let mod = 0;
-      panel.find("input.com-approve:checked").each((_, el) => {
+      $panel.find("input.com-approve:checked").each((_, el) => {
         mod += Number(el.dataset.mod ?? 0);
       });
 
-      panel.find(".com-artifacts-mod").text(`${mod >= 0 ? "+" : ""}${mod}`);
+      $panel.find(".com-artifacts-mod").text(`${mod >= 0 ? "+" : ""}${mod}`);
 
-      // Apply to Custom Modifier field (this is how your reference version worked)
-      modInput.val((app._comArtifactsBaseMod ?? 0) + mod);
-      modInput.trigger("input");
-      modInput.trigger("change");
+      // Apply to Custom Modifier
+      $modInput.val((app._comArtifactsBaseMod ?? 0) + mod);
+      $modInput.trigger("input");
+      $modInput.trigger("change");
     }
 
     recomputeAndApply();
-    panel.on("change", "input.com-approve", recomputeAndApply);
+    $panel.on("change", "input.com-approve", recomputeAndApply);
 
-    // When the form submits, clear persisted selection so next roll starts clean
-    form.off("submit.comArtifacts").on("submit.comArtifacts", async () => {
-      await clearSel(actor.id);
+    // On submit/confirm: clear selection for THIS actor (optional)
+    $mount.off("submit.comArtifacts").on("submit.comArtifacts", () => {
+      clearSel(actor.id);
     });
 
   } catch (e) {
