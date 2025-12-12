@@ -1,14 +1,21 @@
 /* com-artifacts | Foundry v13 build 350 | city-of-mist 4.0.4
- * Two fixed artifact slots (image + 2 power + 1 weakness)
- * Click pen to name; click name to select (+1 power / -1 weakness)
- * Inject into RollDialog + TagReviewDialog by using renderApplication (reliable)
+ * - Adds an Artifacts tab with exactly 2 slots
+ * - Each slot: image + 2 power tags + 1 weakness tag
+ * - Click pen to name a tag; click tag name to toggle selected/highlight
+ * - Power selected = +1, Weakness selected = -1
+ * - Player RollDialog: shows selected artifact tags and applies total to "Custom Modifier"
+ * - GM TagReviewDialog: shows selected artifact tags (UI injection)
+ *
+ * Paste this as your entire main.js
  */
 
 const MOD_ID = "com-artifacts";
 const FLAG_SCOPE = MOD_ID;
 const FLAG_KEY = "data";
 
-function jq(html) {
+/* ---------------- Utilities ---------------- */
+
+function asJQ(html) {
   return (html && html.jquery) ? html : globalThis.jQuery(html);
 }
 
@@ -25,7 +32,7 @@ function randomID() {
   return foundry.utils.randomID?.() ?? Math.random().toString(36).slice(2);
 }
 
-/* ---------------- Flags ---------------- */
+/* ---------------- Data (flags) ---------------- */
 
 function normalizeFlag(raw) {
   const mkSlot = () => ({
@@ -59,11 +66,13 @@ function normalizeFlag(raw) {
     slot.weakness.selected = Boolean(w.selected ?? slot.weakness.selected);
     if (!slot.weakness.name) slot.weakness.selected = false;
   }
+
   return out;
 }
 
 async function getFlag(actor) {
-  return normalizeFlag(actor.getFlag(FLAG_SCOPE, FLAG_KEY));
+  const raw = actor.getFlag(FLAG_SCOPE, FLAG_KEY);
+  return normalizeFlag(raw);
 }
 
 async function setFlag(actor, data) {
@@ -99,7 +108,23 @@ function computeSelected(flagData) {
   return { selected, mod };
 }
 
-/* ---------------- Sheet Tab UI ---------------- */
+/* ---------------- Actor resolution (CRITICAL for player side) ---------------- */
+
+function resolveActorForApp(app) {
+  // This is the key: game.user.character is needed on player clients.
+  return (
+    app?.actor ||
+    app?.options?.actor ||
+    (app?.options?.actorId ? game.actors.get(app.options.actorId) : null) ||
+    (app?.object?.actor ?? null) ||
+    (app?.object && app?.object?.documentName === "Actor" ? app.object : null) ||
+    game.user?.character ||
+    canvas?.tokens?.controlled?.[0]?.actor ||
+    null
+  );
+}
+
+/* ---------------- Sheet tab UI ---------------- */
 
 function isEditable(app) {
   if (typeof app.isEditable === "boolean") return app.isEditable;
@@ -126,7 +151,7 @@ function renderTabHtml(data, editable) {
           <span class="com-tag ${hasName ? "filled" : "empty"} ${active ? "active" : ""}" data-action="toggle">
             ${hasName ? escapeHtml(p.name) : "—"}
           </span>
-          <button type="button" class="com-icon" data-action="edit" ${editable ? "" : "disabled"}>
+          <button type="button" class="com-icon" data-action="edit" ${editable ? "" : "disabled"} title="Edit">
             <i class="fas fa-pen"></i>
           </button>
         </div>`;
@@ -142,7 +167,7 @@ function renderTabHtml(data, editable) {
         <span class="com-tag ${wHasName ? "filled" : "empty"} ${wActive ? "active" : ""}" data-action="toggle">
           ${wHasName ? escapeHtml(w.name) : "—"}
         </span>
-        <button type="button" class="com-icon" data-action="edit" ${editable ? "" : "disabled"}>
+        <button type="button" class="com-icon" data-action="edit" ${editable ? "" : "disabled"} title="Edit">
           <i class="fas fa-pen"></i>
         </button>
       </div>`;
@@ -167,6 +192,10 @@ function renderTabHtml(data, editable) {
 
             <div class="com-box-title" style="margin-top:10px;">Weakness Tag</div>
             <div class="com-box">${weaknessLine}</div>
+
+            <div style="margin-top:10px;opacity:.9;">
+              Selected modifier from artifacts: <b>${computeSelected(data).mod}</b>
+            </div>
           </div>
         </div>
       </div>`;
@@ -207,7 +236,7 @@ async function upsertTab(app, html) {
   const actor = app.object ?? app.actor;
   if (!actor) return;
 
-  const $html = jq(html);
+  const $html = asJQ(html);
   const editable = isEditable(app);
   const data = await getFlag(actor);
 
@@ -229,18 +258,18 @@ async function upsertTab(app, html) {
   }
 
   container.html(renderTabHtml(data, editable));
-  wireHandlers(app, $html, actor);
+  wireSheetHandlers(app, $html, actor);
 }
 
-function wireHandlers(app, $html, actor) {
+function wireSheetHandlers(app, $html, actor) {
   const root = $html.find(`.tab[data-tab="${MOD_ID}"] .com-root`);
   if (!root.length) return;
 
   const editable = isEditable(app);
 
-  root.find('[data-action="set-image"]').off("click").on("click", async (ev) => {
+  root.find('[data-action="set-image"]').off(`click.${MOD_ID}`).on(`click.${MOD_ID}`, async (ev) => {
     if (!editable) return;
-    const slotIdx = Number($(ev.currentTarget).closest(".com-slot").attr("data-slot"));
+    const slotIdx = Number(asJQ(ev.currentTarget).closest(".com-slot").attr("data-slot"));
     const data = await getFlag(actor);
 
     new Dialog({
@@ -261,18 +290,18 @@ function wireHandlers(app, $html, actor) {
     }).render(true);
   });
 
-  root.find('[data-action="clear-image"]').off("click").on("click", async (ev) => {
+  root.find('[data-action="clear-image"]').off(`click.${MOD_ID}`).on(`click.${MOD_ID}`, async (ev) => {
     if (!editable) return;
-    const slotIdx = Number($(ev.currentTarget).closest(".com-slot").attr("data-slot"));
+    const slotIdx = Number(asJQ(ev.currentTarget).closest(".com-slot").attr("data-slot"));
     const data = await getFlag(actor);
     data.artifacts[slotIdx].img = "";
     await setFlag(actor, data);
     app.render(true);
   });
 
-  root.find('[data-action="edit"]').off("click").on("click", async (ev) => {
+  root.find('[data-action="edit"]').off(`click.${MOD_ID}`).on(`click.${MOD_ID}`, async (ev) => {
     if (!editable) return;
-    const line = $(ev.currentTarget).closest(".com-line");
+    const line = asJQ(ev.currentTarget).closest(".com-line");
     const slotIdx = Number(line.attr("data-slot"));
     const kind = String(line.attr("data-kind"));
     const lineIdx = Number(line.attr("data-line"));
@@ -307,8 +336,8 @@ function wireHandlers(app, $html, actor) {
     }).render(true);
   });
 
-  root.find('[data-action="toggle"]').off("click").on("click", async (ev) => {
-    const line = $(ev.currentTarget).closest(".com-line");
+  root.find('[data-action="toggle"]').off(`click.${MOD_ID}`).on(`click.${MOD_ID}`, async (ev) => {
+    const line = asJQ(ev.currentTarget).closest(".com-line");
     const slotIdx = Number(line.attr("data-slot"));
     const kind = String(line.attr("data-kind"));
     const lineIdx = Number(line.attr("data-line"));
@@ -328,141 +357,141 @@ function wireHandlers(app, $html, actor) {
   });
 }
 
-/* ---------------- Injection Helpers ---------------- */
+/* ---------------- RollDialog injection (Player side + GM side) ---------------- */
 
-function resolveActorForApp(app) {
-  // Best-effort actor resolution across CoM dialogs
-  return (
-    app?.actor ||
-    app?.object?.actor ||
-    (app?.object && app?.object?.documentName === "Actor" ? app.object : null) ||
-    (app?.options?.actorId ? game.actors.get(app.options.actorId) : null) ||
-    ChatMessage.getSpeakerActor?.(ChatMessage.getSpeaker()) ||
-    canvas?.tokens?.controlled?.[0]?.actor ||
-    null
-  );
+function findCustomModifierInput($html) {
+  // 1) Find exact label text "Custom Modifier"
+  const labels = $html.find("label");
+  for (const el of labels) {
+    const txt = (el.textContent ?? "").trim().toLowerCase();
+    if (txt === "custom modifier") {
+      const input = asJQ(el).closest("div, label, .form-group, .form-fields, p").find("input").first();
+      if (input?.length) return input;
+    }
+  }
+
+  // 2) Placeholder/aria-label contains "modifier"
+  const inputs = $html.find("input");
+  for (const el of inputs) {
+    const $el = asJQ(el);
+    const ph = ($el.attr("placeholder") ?? "").toLowerCase();
+    const aria = ($el.attr("aria-label") ?? "").toLowerCase();
+    if (ph.includes("modifier") || aria.includes("modifier")) return $el;
+  }
+
+  // 3) Last resort: first numeric/text input
+  return $html.find('input[type="number"], input[type="text"]').first();
 }
 
-function injectIntoRollDialog(app, html) {
-  const $html = jq(html);
-  const actor = resolveActorForApp(app);
-  if (!actor) return;
+async function injectIntoRollDialog(app, html) {
+  const $html = asJQ(html);
 
-  // avoid double
+  // Do not double inject
   if ($html.find(".com-artifacts-inject").length) return;
 
-  getFlag(actor).then(flagData => {
-    const { selected, mod } = computeSelected(flagData);
-    if (!selected.length && mod === 0) return;
-
-    // Where CoM puts modifiers
-    const modList = $html.find(".modifier-list").first();
-    const host = modList.length ? modList : $html.find(".roll-dialog").first();
-    if (!host.length) return;
-
-    const items = selected.map(t => {
-      const sign = t.value > 0 ? "+1" : "-1";
-      return `<div style="display:flex;gap:8px;align-items:center;">
-                <span style="font-weight:600;">${escapeHtml(t.label)}</span>
-                <span style="opacity:.75">(${sign})</span>
-              </div>`;
-    }).join("");
-
-    host.append(`
-      <div class="com-artifacts-inject" style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,.12);">
-        <div style="font-weight:700;margin-bottom:4px;">Artifact Tags</div>
-        ${items || `<div style="opacity:.7;font-style:italic;">None selected.</div>`}
-        <div style="margin-top:4px;opacity:.9;">Artifact modifier total: <b>${mod}</b></div>
-      </div>
-    `);
-
-    // Apply modifier to the actual input.
-    // CoM sometimes uses #roll-modifier-amt; other times a "Custom Modifier" input without stable name.
-    let input = $html.find("#roll-modifier-amt").first();
-
-    if (!input.length) {
-      // Find the input directly under/near the "Custom Modifier" label text.
-      const label = $html.find("*").filter((_, el) => (el.textContent || "").trim() === "Custom Modifier").first();
-      if (label.length) {
-        const row = label.closest("div, label, .form-group, p");
-        input = row.find("input").first();
-      }
-    }
-
-    if (input.length && mod !== 0) {
-      const cur = Number(input.val() ?? 0) || 0;
-      input.val(cur + mod);
-      input.trigger("input");
-      input.trigger("change");
-    }
-  });
-}
-
-function injectIntoTagReviewDialog(app, html) {
-  const $html = jq(html);
   const actor = resolveActorForApp(app);
   if (!actor) return;
 
-  // avoid double
+  const flagData = await getFlag(actor);
+  const { selected, mod } = computeSelected(flagData);
+
+  // If nothing selected, do nothing
+  if (!selected.length && mod === 0) return;
+
+  const $form = $html.find("form").first();
+  if (!$form.length) return;
+
+  const items = selected.map(t => {
+    const sign = t.value > 0 ? "+1" : "-1";
+    return `<div style="display:flex;gap:8px;align-items:center;">
+              <span style="font-weight:600;">${escapeHtml(t.label)}</span>
+              <span style="opacity:.75;">(${sign})</span>
+            </div>`;
+  }).join("");
+
+  $form.append(`
+    <div class="com-artifacts-inject" style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.12);">
+      <div style="font-weight:700;margin-bottom:4px;">Artifact Tags</div>
+      ${items || `<div style="opacity:.7;font-style:italic;">None selected.</div>`}
+      <div style="margin-top:4px;opacity:.9;">Artifact modifier total: <b>${mod}</b></div>
+    </div>
+  `);
+
+  // Apply to "Custom Modifier" input
+  const $modInput = findCustomModifierInput($html);
+  if ($modInput?.length && mod !== 0) {
+    // store base value per dialog instance
+    if (!Number.isFinite(app._comArtifactsBaseMod)) {
+      const base = Number($modInput.val() ?? 0);
+      app._comArtifactsBaseMod = Number.isFinite(base) ? base : 0;
+    }
+    $modInput.val((app._comArtifactsBaseMod ?? 0) + mod);
+    $modInput.trigger("input");
+    $modInput.trigger("change");
+  }
+}
+
+/* ---------------- TagReviewDialog injection (GM approval window) ---------------- */
+
+async function injectIntoTagReviewDialog(app, html) {
+  const $html = asJQ(html);
+
+  // Do not double inject
   if ($html.find(".com-artifacts-review").length) return;
 
-  getFlag(actor).then(flagData => {
-    const { selected, mod } = computeSelected(flagData);
-    if (!selected.length) return;
+  const actor = resolveActorForApp(app);
+  if (!actor) return;
 
-    // Find the "SelectedItems" column/container (based on your screenshot text)
-    const selectedHdr = $html.find("*").filter((_, el) => (el.textContent || "").trim() === "SelectedItems").first();
-    let selectedCol = null;
+  const flagData = await getFlag(actor);
+  const { selected, mod } = computeSelected(flagData);
+  if (!selected.length && mod === 0) return;
 
-    if (selectedHdr.length) {
-      selectedCol = selectedHdr.closest("div");
-      // usually the items are right under it
-    } else {
-      selectedCol = $html.find(".selected-items, .selectedItems").first();
-    }
+  // Try to put it near the SelectedItems column header if present
+  const selectedHdr = $html.find("*").filter((_, el) => (el.textContent || "").trim() === "SelectedItems").first();
+  const host = selectedHdr.length ? selectedHdr.closest("div") : $html.find("form, .dialog-content").first();
+  if (!host.length) return;
 
-    const host = selectedCol?.length ? selectedCol : $html.find(".dialog-content, form").first();
-    if (!host.length) return;
+  const items = selected.map(t => {
+    const sign = t.value > 0 ? "+1" : "-1";
+    const icon = t.value > 0 ? "fa-bolt" : "fa-skull";
+    return `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;">
+              <i class="fas ${icon}" style="opacity:.85;"></i>
+              <span style="font-weight:600;">${escapeHtml(t.label)}</span>
+              <span style="opacity:.75;">(${sign})</span>
+            </div>`;
+  }).join("");
 
-    const items = selected.map(t => {
-      const sign = t.value > 0 ? "+1" : "-1";
-      // visually similar: lightning icon for power; skull/ban for weakness (best-effort)
-      const icon = t.value > 0 ? "fa-bolt" : "fa-skull";
-      return `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;">
-                <i class="fas ${icon}" style="opacity:.85;"></i>
-                <span style="font-weight:600;">${escapeHtml(t.label)}</span>
-                <span style="opacity:.75;">(${sign})</span>
-              </div>`;
-    }).join("");
-
-    host.append(`
-      <div class="com-artifacts-review" style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,.12);">
-        <div style="font-weight:700;margin-bottom:4px;">Artifact Tags</div>
-        ${items}
-        <div style="margin-top:4px;opacity:.9;">Artifact modifier total: <b>${mod}</b></div>
-      </div>
-    `);
-  });
+  host.append(`
+    <div class="com-artifacts-review" style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,.12);">
+      <div style="font-weight:700;margin-bottom:4px;">Artifact Tags</div>
+      ${items || `<div style="opacity:.7;font-style:italic;">None selected.</div>`}
+      <div style="margin-top:4px;opacity:.9;">Artifact modifier total: <b>${mod}</b></div>
+    </div>
+  `);
 }
 
 /* ---------------- Hooks ---------------- */
 
 Hooks.once("ready", async () => {
-  for (const a of (game.actors ?? [])) await ensureNormalized(a);
+  try {
+    for (const a of (game.actors ?? [])) await ensureNormalized(a);
+  } catch (e) {
+    console.error(`${MOD_ID} | ensureNormalized failed:`, e);
+  }
 });
 
-Hooks.on("renderActorSheet", async (app, html) => upsertTab(app, html));
-Hooks.on("renderActorSheetV2", async (app, html) => upsertTab(app, html));
+Hooks.on("renderActorSheet", async (app, html) => { await upsertTab(app, html); });
+Hooks.on("renderActorSheetV2", async (app, html) => { await upsertTab(app, html); });
 
-// Reliable: everything is an Application; detect by constructor name
+// Most reliable in Foundry v13: all apps trigger this hook
 Hooks.on("renderApplication", (app, html) => {
   const name = app?.constructor?.name ?? "";
 
   if (name === "RollDialog") {
-    injectIntoRollDialog(app, html);
+    injectIntoRollDialog(app, html).catch(e => console.error(`${MOD_ID} | injectIntoRollDialog failed`, e));
   }
 
   if (name === "TagReviewDialog") {
-    injectIntoTagReviewDialog(app, html);
+    injectIntoTagReviewDialog(app, html).catch(e => console.error(`${MOD_ID} | injectIntoTagReviewDialog failed`, e));
   }
 });
