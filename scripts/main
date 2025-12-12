@@ -1,0 +1,312 @@
+const MODULE_ID = "com-artifacts";
+
+/* -------------------- Data Model -------------------- */
+
+function defaultArtifacts() {
+  return [
+    {
+      name: "Artifact 1",
+      img: "",
+      power: [{ name: "", active: false }, { name: "", active: false }],
+      weakness: { name: "", active: false }
+    },
+    {
+      name: "Artifact 2",
+      img: "",
+      power: [{ name: "", active: false }, { name: "", active: false }],
+      weakness: { name: "", active: false }
+    }
+  ];
+}
+
+async function getArtifacts(actor) {
+  const data = (await actor.getFlag(MODULE_ID, "artifacts")) ?? defaultArtifacts();
+  if (!Array.isArray(data) || data.length !== 2) return defaultArtifacts();
+  return data;
+}
+
+async function setArtifacts(actor, artifacts) {
+  return actor.setFlag(MODULE_ID, "artifacts", artifacts);
+}
+
+function computeModifier(artifact) {
+  let mod = 0;
+  for (const p of artifact.power ?? []) {
+    if (p?.active && (p?.name ?? "").trim()) mod += 1;
+  }
+  const w = artifact.weakness;
+  if (w?.active && (w?.name ?? "").trim()) mod -= 1;
+  return mod;
+}
+
+function summarizeSelected(artifact) {
+  const power = (artifact.power ?? []).filter(t => t.active && (t.name ?? "").trim()).map(t => t.name.trim());
+  const weakness = (artifact.weakness?.active && (artifact.weakness?.name ?? "").trim()) ? artifact.weakness.name.trim() : null;
+  return { power, weakness };
+}
+
+function renderArtifactCard(actorName, artifact, mod) {
+  const sign = mod >= 0 ? "+" : "";
+  const { power, weakness } = summarizeSelected(artifact);
+  const li = (t) => `<li>${Handlebars.escapeExpression(t)}</li>`;
+
+  return `
+  <div class="chat-card">
+    <header class="card-header">
+      <h3>Artifact Applied: ${Handlebars.escapeExpression(actorName)} — ${Handlebars.escapeExpression(artifact.name ?? "Artifact")}</h3>
+    </header>
+    <div class="card-content">
+      <p><strong>Modifier:</strong> ${sign}${mod}</p>
+      ${power.length ? `<p><strong>Power tags:</strong></p><ul>${power.map(li).join("")}</ul>` : `<p><em>No active power tags.</em></p>`}
+      ${weakness ? `<p><strong>Weakness tag:</strong></p><ul>${li(weakness)}</ul>` : ""}
+    </div>
+  </div>`;
+}
+
+/* -------------------- Arm / Disarm -------------------- */
+
+async function armArtifact(actor, artifactIndex, mode /* "next" | "persistent" */) {
+  const artifacts = await getArtifacts(actor);
+  const artifact = artifacts[artifactIndex];
+  const mod = computeModifier(artifact);
+
+  const payload = {
+    artifactIndex,
+    mode,
+    armedAt: Date.now(),
+    modifier: mod,
+    artifactSnapshot: artifact // snapshot so it won’t change mid-roll
+  };
+
+  await actor.setFlag(MODULE_ID, "armed", payload);
+
+  ui.notifications?.info(
+    mode === "persistent"
+      ? `Artifact armed (persistent): ${artifact.name} (${mod >= 0 ? "+" : ""}${mod})`
+      : `Artifact armed (next roll): ${artifact.name} (${mod >= 0 ? "+" : ""}${mod})`
+  );
+}
+
+async function disarmArtifact(actor) {
+  await actor.unsetFlag(MODULE_ID, "armed");
+  ui.notifications?.info("Artifact disarmed.");
+}
+
+/* -------------------- Roll Intercept -------------------- */
+/**
+ * We intercept chat message creation:
+ * - If message has a speaker actor with an armed artifact flag, we:
+ *   1) post an Artifact Applied card
+ *   2) if msg.rolls has a standard roll formula, we also post an adjusted roll
+ *   3) clear the arm flag if mode === "next"
+ *
+ * This avoids any dependence on CoM internal APIs.
+ */
+Hooks.on("preCreateChatMessage", async (msg, data, options, userId) => {
+  try {
+    if (userId !== game.user.id) return; // only modify messages created by local user context
+
+    const speaker = data.speaker ?? msg.speaker;
+    const actorId = speaker?.actor;
+    if (!actorId) return;
+
+    const actor = game.actors.get(actorId);
+    if (!actor) return;
+
+    const armed = await actor.getFlag(MODULE_ID, "armed");
+    if (!armed?.artifactSnapshot) return;
+
+    // Only apply if this message is plausibly a roll or move output.
+    // CoM may post templated messages without rolls, so we still post the card.
+    const artifact = armed.artifactSnapshot;
+    const mod = Number(armed.modifier ?? 0);
+
+    // Post the card immediately
+    await ChatMessage.create({
+      user: game.user.id,
+      speaker: ChatMessage.getSpeaker({ actor }),
+      content: renderArtifactCard(actor.name, artifact, mod),
+      flags: { [MODULE_ID]: { type: "artifact-card", artifactIndex: armed.artifactIndex, modifier: mod } }
+    });
+
+    // If the message includes a standard Foundry roll, also post an adjusted roll
+    const rolls = data.rolls ?? msg.rolls;
+    if (Array.isArray(rolls) && rolls.length) {
+      const base = rolls[0];
+      const baseFormula = base?.formula ?? base?._formula;
+      if (baseFormula && typeof baseFormula === "string") {
+        try {
+          const adjusted = await (new Roll(`(${baseFormula}) + ${mod}`)).evaluate({ async: true });
+          await adjusted.toMessage({
+            speaker: ChatMessage.getSpeaker({ actor }),
+            flavor: `Adjusted Roll (Artifact: ${artifact.name ?? "Artifact"} ${mod >= 0 ? "+" : ""}${mod})`
+          });
+        } catch (e) {
+          // If adjusted roll fails, we still have the modifier card posted.
+          console.warn(`${MODULE_ID} | Adjusted roll failed`, e);
+        }
+      }
+    }
+
+    // Auto-clear if "next"
+    if (armed.mode === "next") {
+      await actor.unsetFlag(MODULE_ID, "armed");
+    }
+  } catch (e) {
+    console.warn(`${MODULE_ID} | preCreateChatMessage error`, e);
+  }
+});
+
+/* -------------------- Sheet UI -------------------- */
+
+function addArtifactsTab(app, html, actor) {
+  // Show to owners (players) and GM
+  if (!actor?.testUserPermission(game.user, "OWNER")) return;
+
+  const nav = html.find('nav.sheet-tabs, nav.tabs');
+  if (!nav.length) return;
+
+  if (nav.find(`a.item[data-tab="${MODULE_ID}"]`).length === 0) {
+    nav.append(`<a class="item" data-tab="${MODULE_ID}">Artifacts</a>`);
+  }
+
+  const body = html.find(".sheet-body");
+  if (!body.length || body.find(`.tab[data-tab="${MODULE_ID}"]`).length) return;
+
+  body.append(`
+    <div class="tab" data-tab="${MODULE_ID}">
+      <div class="com-artifacts-grid"></div>
+      <hr/>
+      <div class="com-artifacts-global" style="margin-top:10px;">
+        <button type="button" class="com-disarm"><i class="fas fa-ban"></i> Disarm Artifact</button>
+        <p class="notes" style="margin-top:6px;">
+          Arm applies to your next roll (or persists if you choose persistent).
+        </p>
+      </div>
+    </div>
+  `);
+
+  (async () => {
+    const artifacts = await getArtifacts(actor);
+    const grid = body.find(`.tab[data-tab="${MODULE_ID}"] .com-artifacts-grid`);
+
+    const renderSlot = (a, idx) => {
+      const imgStyle = a.img ? `style="background-image:url('${a.img.replace(/'/g, "%27")}')"` : "";
+      return `
+      <section class="com-artifact" data-idx="${idx}">
+        <header>
+          <div class="img" ${imgStyle}></div>
+          <div class="name" style="flex:1">
+            <label>Artifact Name</label>
+            <input type="text" data-field="name" value="${Handlebars.escapeExpression(a.name ?? "")}" />
+          </div>
+        </header>
+
+        <div class="controls">
+          <button type="button" class="com-pick-img"><i class="fas fa-image"></i> Image</button>
+          <button type="button" class="com-clear-img"><i class="fas fa-trash"></i> Clear</button>
+        </div>
+
+        <div class="tags">
+          <label>Power Tags (toggle active)</label>
+
+          <div class="tag-row">
+            <input type="checkbox" data-field="power.0.active" ${a.power?.[0]?.active ? "checked" : ""}/>
+            <input type="text" data-field="power.0.name" value="${Handlebars.escapeExpression(a.power?.[0]?.name ?? "")}" placeholder="Power tag 1"/>
+          </div>
+
+          <div class="tag-row">
+            <input type="checkbox" data-field="power.1.active" ${a.power?.[1]?.active ? "checked" : ""}/>
+            <input type="text" data-field="power.1.name" value="${Handlebars.escapeExpression(a.power?.[1]?.name ?? "")}" placeholder="Power tag 2"/>
+          </div>
+
+          <label style="margin-top:8px; display:block;">Weakness Tag (toggle active)</label>
+          <div class="tag-row">
+            <input type="checkbox" data-field="weakness.active" ${a.weakness?.active ? "checked" : ""}/>
+            <input type="text" data-field="weakness.name" value="${Handlebars.escapeExpression(a.weakness?.name ?? "")}" placeholder="Weakness tag"/>
+          </div>
+        </div>
+
+        <div class="controls">
+          <button type="button" class="com-arm-next"><i class="fas fa-bolt"></i> Arm (Next Roll)</button>
+          <button type="button" class="com-arm-persist"><i class="fas fa-broadcast-tower"></i> Arm (Persistent Aura)</button>
+        </div>
+
+        <div class="hint">
+          Modifier = +1 per active Power tag, -1 per active Weakness tag.
+        </div>
+      </section>`;
+    };
+
+    grid.html(artifacts.map(renderSlot).join(""));
+
+    // Save changes
+    grid.on("change", "input", async (ev) => {
+      const section = ev.currentTarget.closest(".com-artifact");
+      const idx = Number(section.dataset.idx);
+      const field = ev.currentTarget.dataset.field;
+      if (!field) return;
+
+      const artifacts2 = await getArtifacts(actor);
+      const path = field.split(".");
+      let ref = artifacts2[idx];
+      for (let i = 0; i < path.length - 1; i++) ref = ref[path[i]];
+      const lastKey = path[path.length - 1];
+
+      if (ev.currentTarget.type === "checkbox") ref[lastKey] = ev.currentTarget.checked;
+      else ref[lastKey] = ev.currentTarget.value;
+
+      await setArtifacts(actor, artifacts2);
+    });
+
+    // Image pick/clear
+    grid.on("click", ".com-pick-img", async (ev) => {
+      const section = ev.currentTarget.closest(".com-artifact");
+      const idx = Number(section.dataset.idx);
+      const artifacts2 = await getArtifacts(actor);
+
+      new FilePicker({
+        type: "image",
+        current: artifacts2[idx].img || "",
+        callback: async (path) => {
+          artifacts2[idx].img = path;
+          await setArtifacts(actor, artifacts2);
+          app.render(false);
+        }
+      }).browse();
+    });
+
+    grid.on("click", ".com-clear-img", async (ev) => {
+      const section = ev.currentTarget.closest(".com-artifact");
+      const idx = Number(section.dataset.idx);
+      const artifacts2 = await getArtifacts(actor);
+      artifacts2[idx].img = "";
+      await setArtifacts(actor, artifacts2);
+      app.render(false);
+    });
+
+    // Arm buttons
+    grid.on("click", ".com-arm-next", async (ev) => {
+      const section = ev.currentTarget.closest(".com-artifact");
+      const idx = Number(section.dataset.idx);
+      await armArtifact(actor, idx, "next");
+    });
+
+    grid.on("click", ".com-arm-persist", async (ev) => {
+      const section = ev.currentTarget.closest(".com-artifact");
+      const idx = Number(section.dataset.idx);
+      await armArtifact(actor, idx, "persistent");
+    });
+
+    // Disarm
+    body.find(`.tab[data-tab="${MODULE_ID}"] .com-disarm`).on("click", async () => {
+      await disarmArtifact(actor);
+    });
+  })();
+}
+
+Hooks.on("renderActorSheet", (app, html) => {
+  const actor = app?.actor;
+  if (!actor) return;
+  addArtifactsTab(app, html, actor);
+});
