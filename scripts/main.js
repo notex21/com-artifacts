@@ -1,6 +1,6 @@
-/* com-artifacts | Foundry v13 | City of Mist 4.0.4
+/* com-artifacts | Foundry v13 build 350 | City of Mist 4.0.4
  * - 2 artifact slots (image + 2 power + 1 weakness)
- * - Click pen to name; click tag to toggle selected
+ * - Click pen to name; click tag to toggle selected/highlight
  * - Power selected = +1, Weakness selected = -1
  * - Player RollDialog: show artifact tags + apply modifier to Custom Modifier input
  * - GM TagReviewDialog: show artifact tags (UI injection)
@@ -113,7 +113,7 @@ function resolveActorForApp(app) {
   );
 }
 
-/* ---------------- Artifacts tab UI ---------------- */
+/* ---------------- Sheet tab UI ---------------- */
 
 function isEditable(app) {
   if (typeof app.isEditable === "boolean") return app.isEditable;
@@ -342,66 +342,81 @@ function wireSheetHandlers(app, $html, actor) {
   });
 }
 
-/* ---------------- RollDialog: DOM-based injection with retries ---------------- */
+/* ---------------- RollDialog injection (PLAYER FIX) ---------------- */
 
 function findVisibleRollDialogRoot() {
-  // Find the most recent visible window that contains .roll-dialog
   const $wins = globalThis.jQuery(".window-app:visible");
   for (let i = $wins.length - 1; i >= 0; i--) {
     const $w = globalThis.jQuery($wins[i]);
     if ($w.find(".roll-dialog").length) return $w;
   }
-  return globalThis.jQuery(); // empty
+  return globalThis.jQuery();
 }
 
-function findCustomModifierInput($root) {
-  // In CoM 4.0.4 it’s typically inside the roll dialog with label "Custom Modifier"
-  const $labels = $root.find("label");
+function findCustomModifierInput($roll) {
+  // 1) find label == "Custom Modifier"
+  const $labels = $roll.find("label");
+  let $label = globalThis.jQuery();
   for (const el of $labels) {
-    const txt = (el.textContent ?? "").trim().toLowerCase();
-    if (txt === "custom modifier") {
-      const $row = globalThis.jQuery(el).closest("div, label, .form-group, .form-fields, p");
-      const $inp = $row.find("input").first();
-      if ($inp.length) return $inp;
+    if ((el.textContent ?? "").trim() === "Custom Modifier") {
+      $label = globalThis.jQuery(el);
+      break;
     }
   }
+  if ($label.length) {
+    // a) direct parent search
+    let $inp = $label.parent().find("input").first();
+    if ($inp.length) return $inp;
 
-  // fallback: any input that looks like modifier
-  let $inp = $root.find('#roll-modifier-amt').first();
+    // b) closest wrapper search
+    $inp = $label.closest("div, .form-group, .form-fields, p, label").find("input").first();
+    if ($inp.length) return $inp;
+
+    // c) next siblings search (common CoM layout)
+    $inp = $label.nextAll("input").first();
+    if ($inp.length) return $inp;
+
+    // d) next wrapper search
+    $inp = $label.parent().nextAll("div, .form-group, .form-fields").find("input").first();
+    if ($inp.length) return $inp;
+
+    // e) global: first input after label within roll dialog
+    const labelEl = $label[0];
+    const all = $roll.find("input").toArray();
+    const idx = all.findIndex(i => i.compareDocumentPosition(labelEl) & Node.DOCUMENT_POSITION_PRECEDING);
+    // idx can be 0 if first input already after label; if not found, fallback below.
+    if (idx >= 0 && all[idx]) return globalThis.jQuery(all[idx]);
+  }
+
+  // 2) fallback: any input that looks like modifier
+  let $inp = $roll.find('#roll-modifier-amt').first();
   if ($inp.length) return $inp;
 
-  $inp = $root.find('input[id*="modifier" i], input[name*="modifier" i]').first();
+  $inp = $roll.find('input[id*="modifier" i], input[name*="modifier" i]').first();
   if ($inp.length) return $inp;
 
-  $inp = $root.find('input[type="number"], input[type="text"]').first();
-  return $inp;
+  // 3) last resort
+  return $roll.find('input[type="number"], input[type="text"]').first();
 }
 
 async function injectIntoRollDialogDOM(app, attempt = 0) {
-  // Retry a few times because on players the DOM is often attached slightly later
   if (attempt > 12) return; // ~600ms total
 
   const actor = resolveActorForApp(app);
   if (!actor) return;
 
   const $root = findVisibleRollDialogRoot();
-  if (!$root.length) {
-    return setTimeout(() => injectIntoRollDialogDOM(app, attempt + 1), 50);
-  }
+  if (!$root.length) return setTimeout(() => injectIntoRollDialogDOM(app, attempt + 1), 50);
 
   const $roll = $root.find(".roll-dialog").first();
-  if (!$roll.length) {
-    return setTimeout(() => injectIntoRollDialogDOM(app, attempt + 1), 50);
-  }
+  if (!$roll.length) return setTimeout(() => injectIntoRollDialogDOM(app, attempt + 1), 50);
 
-  // already injected?
   if ($roll.find(".com-artifacts-inject").length) return;
 
   const flagData = await getFlag(actor);
   const { selected, mod } = computeSelected(flagData);
   if (!selected.length && mod === 0) return;
 
-  // Insert into modifier-list if present, else into roll root
   const $host = $roll.find(".modifier-list").first().length ? $roll.find(".modifier-list").first() : $roll;
 
   const items = selected.map(t => {
@@ -415,15 +430,13 @@ async function injectIntoRollDialogDOM(app, attempt = 0) {
   $host.append(`
     <div class="com-artifacts-inject" style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,.12);">
       <div style="font-weight:700;margin-bottom:4px;">Artifact Tags</div>
-      ${items || `<div style="opacity:.7;font-style:italic;">None selected.</div>`}
+      ${items}
       <div style="margin-top:4px;opacity:.9;">Artifact modifier total: <b>${mod}</b></div>
     </div>
   `);
 
-  // Apply modifier to Custom Modifier input
   const $modInput = findCustomModifierInput($roll);
-  if ($modInput?.length && mod !== 0) {
-    // store base per dialog instance
+  if ($modInput?.length) {
     if (!Number.isFinite(app._comArtifactsBaseMod)) {
       const base = Number($modInput.val() ?? 0);
       app._comArtifactsBaseMod = Number.isFinite(base) ? base : 0;
@@ -434,11 +447,10 @@ async function injectIntoRollDialogDOM(app, attempt = 0) {
   }
 }
 
-/* ---------------- TagReviewDialog injection (GM window) ---------------- */
+/* ---------------- TagReviewDialog injection (GM) ---------------- */
 
 async function injectIntoTagReviewDialog(app, html) {
   const $html = asJQ(html);
-
   if ($html.find(".com-artifacts-review").length) return;
 
   const actor = resolveActorForApp(app);
@@ -465,7 +477,7 @@ async function injectIntoTagReviewDialog(app, html) {
   $host.append(`
     <div class="com-artifacts-review" style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,.12);">
       <div style="font-weight:700;margin-bottom:4px;">Artifact Tags</div>
-      ${items || `<div style="opacity:.7;font-style:italic;">None selected.</div>`}
+      ${items}
       <div style="margin-top:4px;opacity:.9;">Artifact modifier total: <b>${mod}</b></div>
     </div>
   `);
@@ -486,11 +498,9 @@ Hooks.on("renderActorSheetV2", async (app, html) => upsertTab(app, html));
 
 Hooks.on("renderApplication", (app, html) => {
   const name = app?.constructor?.name ?? "";
-
   if (name === "RollDialog") {
     injectIntoRollDialogDOM(app).catch(e => console.error(`${MOD_ID} | RollDialog inject failed`, e));
   }
-
   if (name === "TagReviewDialog") {
     injectIntoTagReviewDialog(app, html).catch(e => console.error(`${MOD_ID} | TagReview inject failed`, e));
   }
