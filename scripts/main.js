@@ -186,8 +186,91 @@ function ensureArtifactsTab(app, html, actor) {
     const artifacts = await getArtifacts(actor);
     const grid = body.find(`.tab[data-tab="${MODULE_ID}"] .com-artifacts-grid`);
 
-    const renderSlot = (a, idx) => {
-      const imgStyle = a.img ? `style="background-image:url('${a.img.replace(/'/g, "%27")}')"` : "";
+    const renderTagRow = (label, pickKey, value, field, isWeak = false) => {
+  const safeVal = Handlebars.escapeExpression(value ?? "");
+  const hasValue = !!safeVal.trim();
+
+  return `
+    <div class="tag-row">
+      ${
+        hasValue
+          ? `
+            <span class="com-tag-pick ${isWeak ? "com-weak" : ""}" data-pick="${pickKey}">
+              ${safeVal}
+            </span>
+            <button type="button"
+              class="com-edit-tag"
+              title="Edit tag"
+              data-edit="${field}">
+              ✎
+            </button>
+          `
+          : ""
+      }
+
+      <input type="text"
+        class="com-tag-input"
+        data-field="${field}"
+        value="${safeVal}"
+        placeholder="${label}"
+        style="${hasValue ? "display:none;" : ""}"
+      />
+    </div>
+  `;
+};
+
+const renderSlot = (a, idx) => {
+  const imgStyle = a.img ? `style="background-image:url('${a.img.replace(/'/g, "%27")}')"` : "";
+  return `
+  <section class="com-artifact" data-idx="${idx}">
+    <header>
+      <div class="img" ${imgStyle}></div>
+      <div class="name" style="flex:1">
+        <label>Artifact Name</label>
+        <input type="text" data-field="name"
+          value="${Handlebars.escapeExpression(a.name ?? "")}" />
+      </div>
+    </header>
+
+    <div class="controls">
+      <button type="button" class="com-pick-img">Image</button>
+      <button type="button" class="com-clear-img">Clear</button>
+    </div>
+
+    <div class="tags">
+      <label>Power Tags (click to mark)</label>
+
+      ${renderTagRow(
+        "Power tag 1",
+        `a${idx}.p0`,
+        a.power?.[0]?.name,
+        "power.0.name"
+      )}
+
+      ${renderTagRow(
+        "Power tag 2",
+        `a${idx}.p1`,
+        a.power?.[1]?.name,
+        "power.1.name"
+      )}
+
+      <label style="margin-top:8px; display:block;">Weakness Tag (click to mark)</label>
+
+      ${renderTagRow(
+        "Weakness tag",
+        `a${idx}.w`,
+        a.weakness?.name,
+        "weakness.name",
+        true
+      )}
+    </div>
+
+    <div class="hint">
+      Click tag names to highlight. Highlighted tags appear in Make Roll for MC approval.
+    </div>
+  </section>`;
+};
+
 
       // IMPORTANT: label shows ONLY actual stored text (no placeholders)
       const p0Label = ((a.power?.[0]?.name ?? "").trim());
@@ -252,6 +335,22 @@ function ensureArtifactsTab(app, html, actor) {
       const key = ev.currentTarget.dataset.pick;
       const set = toggleSel(actor.id, key);
       $(ev.currentTarget).toggleClass("com-picked", set.has(key));
+      
+      // Edit button: reveal input field
+grid.on("click.comArtifacts", ".com-edit-tag", (ev) => {
+  ev.preventDefault();
+  ev.stopPropagation();
+
+  const row = ev.currentTarget.closest(".tag-row");
+  if (!row) return;
+
+  const input = row.querySelector(".com-tag-input");
+  if (!input || input.disabled) return;
+
+  input.style.display = "";
+  input.focus();
+});
+
     });
 
     // Save changes (name fields / tag text fields only)
