@@ -74,18 +74,14 @@ function forceActivateTab(app, tab) {
 /* -------------------- Lock-aware editing (Artifacts tab matches sheet lock) -------------------- */
 
 function isSheetEditable(html) {
-  // Look for a “normal” input (not in our Artifacts tab). If it’s disabled, sheet is locked.
   const ref = html
     .find(`.sheet-body .tab:not([data-tab="${MODULE_ID}"]) input, .sheet-body .tab:not([data-tab="${MODULE_ID}"]) textarea, .sheet-body .tab:not([data-tab="${MODULE_ID}"]) select`)
     .filter((_, el) => el.offsetParent !== null);
 
   if (ref.length) {
-    // If ANY visible ref input is enabled, sheet is editable.
     const anyEnabled = ref.toArray().some(el => !el.disabled);
     return anyEnabled;
   }
-
-  // Fallback: assume editable
   return true;
 }
 
@@ -93,18 +89,19 @@ function setArtifactsEditable(html, editable) {
   const tab = html.find(`.sheet-body .tab[data-tab="${MODULE_ID}"]`);
   if (!tab.length) return;
 
-  // Buttons disabled when locked
   tab.find("button.com-pick-img, button.com-clear-img").prop("disabled", !editable);
 
   if (editable) {
-    // Show edit inputs and enable them
-    tab.find(".com-editor-only").show().prop("disabled", false);
+    // Enable editor-only controls, but visibility is handled per-row by UI logic
+    tab.find(".com-editor-only").prop("disabled", false);
+    tab.find(".com-edit-tag").prop("disabled", false).show();
 
-    // Always show tag labels in edit mode (so you can click even before naming)
+    // In edit mode, keep clickable tags visible (even if empty will be hidden by row UI)
     tab.find(".com-tag-pick").show();
   } else {
-    // Hide edit inputs completely when locked
-    tab.find(".com-editor-only").hide().prop("disabled", true);
+    // Hide ALL inputs/buttons that allow editing
+    tab.find(".com-editor-only").prop("disabled", true).hide();
+    tab.find(".com-edit-tag").prop("disabled", true).hide();
 
     // Hide empty labels when locked (only show written names)
     tab.find(".com-tag-pick").each((_, el) => {
@@ -114,7 +111,7 @@ function setArtifactsEditable(html, editable) {
     });
   }
 
-  // Tag picking stays active even when locked (like CoM tag selection)
+  // Tag picking stays active even when locked
   tab.find(".com-tag-pick").css("pointer-events", "auto");
 
   tab.css("opacity", editable ? "" : "0.85");
@@ -156,9 +153,22 @@ function ensureArtifactsTab(app, html, actor) {
       .com-artifact .controls { display:flex; gap:8px; margin-top:8px; }
       .com-artifact .tag-row { display:flex; gap:8px; align-items:center; margin:6px 0; }
       .com-artifact .tag-row input[type="text"] { flex: 1; }
+
       .com-tag-pick { display:inline-block; padding:2px 6px; border-radius:4px; cursor:pointer; user-select:none; }
       .com-tag-pick.com-picked { background: #ffeb3b; }
       .com-tag-pick.com-weak.com-picked { background: #ffd54f; }
+
+      .com-edit-tag {
+        background: none;
+        border: none;
+        padding: 0 4px;
+        cursor: pointer;
+        opacity: .65;
+        font-size: 12px;
+        line-height: 1;
+      }
+      .com-edit-tag:hover { opacity: 1; }
+
       .com-artifact .hint { opacity: .8; font-size: 12px; margin-top: 8px; }
     `;
     document.head.appendChild(style);
@@ -182,101 +192,65 @@ function ensureArtifactsTab(app, html, actor) {
     `);
   }
 
+  function syncTagRowUI($row, editable) {
+    const $pick = $row.find(".com-tag-pick");
+    const $edit = $row.find(".com-edit-tag");
+    const $input = $row.find("input.com-editor-only");
+
+    const name = ($pick.text() ?? "").trim();
+    const editing = $row.data("editing") === 1;
+
+    if (!editable) {
+      // Locked: no inputs/edit buttons; show only non-empty pick
+      $input.hide();
+      $edit.hide();
+      $pick.toggle(!!name);
+      return;
+    }
+
+    // Editable:
+    if (editing) {
+      $pick.show(); // keep pick shown for click-to-highlight
+      $edit.hide();
+      $input.show();
+      return;
+    }
+
+    if (name) {
+      // Named: show pick + edit, hide input
+      $pick.show();
+      $edit.show();
+      $input.hide();
+    } else {
+      // Empty: hide pick+edit, show input
+      $pick.hide();
+      $edit.hide();
+      $input.show();
+    }
+  }
+
   (async () => {
     const artifacts = await getArtifacts(actor);
     const grid = body.find(`.tab[data-tab="${MODULE_ID}"] .com-artifacts-grid`);
 
-    const renderTagRow = (label, pickKey, value, field, isWeak = false) => {
-  const safeVal = Handlebars.escapeExpression(value ?? "");
-  const hasValue = !!safeVal.trim();
+    const renderTagRow = ({ idx, pickKey, isWeak, field, value, placeholder }) => {
+      const label = ((value ?? "").trim());
+      const hasValue = !!label;
 
-  return `
-    <div class="tag-row">
-      ${
-        hasValue
-          ? `
-            <span class="com-tag-pick ${isWeak ? "com-weak" : ""}" data-pick="${pickKey}">
-              ${safeVal}
-            </span>
-            <button type="button"
-              class="com-edit-tag"
-              title="Edit tag"
-              data-edit="${field}">
-              ✎
-            </button>
-          `
-          : ""
-      }
+      return `
+        <div class="tag-row" data-field="${field}">
+          <span class="com-tag-pick ${isWeak ? "com-weak" : ""}" data-pick="${pickKey}">${Handlebars.escapeExpression(label)}</span>
+          <button type="button" class="com-edit-tag" title="Edit" ${hasValue ? "" : "style=\"display:none;\""}>✎</button>
+          <input class="com-editor-only" type="text" data-field="${field}"
+            value="${Handlebars.escapeExpression(value ?? "")}"
+            placeholder="${Handlebars.escapeExpression(placeholder)}"
+            ${hasValue ? "style=\"display:none;\"" : ""}/>
+        </div>
+      `;
+    };
 
-      <input type="text"
-        class="com-tag-input"
-        data-field="${field}"
-        value="${safeVal}"
-        placeholder="${label}"
-        style="${hasValue ? "display:none;" : ""}"
-      />
-    </div>
-  `;
-};
-
-const renderSlot = (a, idx) => {
-  const imgStyle = a.img ? `style="background-image:url('${a.img.replace(/'/g, "%27")}')"` : "";
-  return `
-  <section class="com-artifact" data-idx="${idx}">
-    <header>
-      <div class="img" ${imgStyle}></div>
-      <div class="name" style="flex:1">
-        <label>Artifact Name</label>
-        <input type="text" data-field="name"
-          value="${Handlebars.escapeExpression(a.name ?? "")}" />
-      </div>
-    </header>
-
-    <div class="controls">
-      <button type="button" class="com-pick-img">Image</button>
-      <button type="button" class="com-clear-img">Clear</button>
-    </div>
-
-    <div class="tags">
-      <label>Power Tags (click to mark)</label>
-
-      ${renderTagRow(
-        "Power tag 1",
-        `a${idx}.p0`,
-        a.power?.[0]?.name,
-        "power.0.name"
-      )}
-
-      ${renderTagRow(
-        "Power tag 2",
-        `a${idx}.p1`,
-        a.power?.[1]?.name,
-        "power.1.name"
-      )}
-
-      <label style="margin-top:8px; display:block;">Weakness Tag (click to mark)</label>
-
-      ${renderTagRow(
-        "Weakness tag",
-        `a${idx}.w`,
-        a.weakness?.name,
-        "weakness.name",
-        true
-      )}
-    </div>
-
-    <div class="hint">
-      Click tag names to highlight. Highlighted tags appear in Make Roll for MC approval.
-    </div>
-  </section>`;
-};
-
-
-      // IMPORTANT: label shows ONLY actual stored text (no placeholders)
-      const p0Label = ((a.power?.[0]?.name ?? "").trim());
-      const p1Label = ((a.power?.[1]?.name ?? "").trim());
-      const wLabel  = ((a.weakness?.name ?? "").trim());
-
+    const renderSlot = (a, idx) => {
+      const imgStyle = a.img ? `style="background-image:url('${a.img.replace(/'/g, "%27")}')"` : "";
       return `
       <section class="com-artifact" data-idx="${idx}">
         <header>
@@ -295,24 +269,28 @@ const renderSlot = (a, idx) => {
         <div class="tags">
           <label>Power Tags (click to mark)</label>
 
-          <div class="tag-row">
-            <span class="com-tag-pick" data-pick="a${idx}.p0">${Handlebars.escapeExpression(p0Label)}</span>
-            <input class="com-editor-only" type="text" data-field="power.0.name"
-              value="${Handlebars.escapeExpression(a.power?.[0]?.name ?? "")}" placeholder="Power tag 1"/>
-          </div>
+          ${renderTagRow({
+            idx, pickKey: `a${idx}.p0`, isWeak: false,
+            field: "power.0.name",
+            value: a.power?.[0]?.name ?? "",
+            placeholder: "Power tag 1"
+          })}
 
-          <div class="tag-row">
-            <span class="com-tag-pick" data-pick="a${idx}.p1">${Handlebars.escapeExpression(p1Label)}</span>
-            <input class="com-editor-only" type="text" data-field="power.1.name"
-              value="${Handlebars.escapeExpression(a.power?.[1]?.name ?? "")}" placeholder="Power tag 2"/>
-          </div>
+          ${renderTagRow({
+            idx, pickKey: `a${idx}.p1`, isWeak: false,
+            field: "power.1.name",
+            value: a.power?.[1]?.name ?? "",
+            placeholder: "Power tag 2"
+          })}
 
           <label style="margin-top:8px; display:block;">Weakness Tag (click to mark)</label>
-          <div class="tag-row">
-            <span class="com-tag-pick com-weak" data-pick="a${idx}.w">${Handlebars.escapeExpression(wLabel)}</span>
-            <input class="com-editor-only" type="text" data-field="weakness.name"
-              value="${Handlebars.escapeExpression(a.weakness?.name ?? "")}" placeholder="Weakness tag"/>
-          </div>
+
+          ${renderTagRow({
+            idx, pickKey: `a${idx}.w`, isWeak: true,
+            field: "weakness.name",
+            value: a.weakness?.name ?? "",
+            placeholder: "Weakness tag"
+          })}
         </div>
 
         <div class="hint">
@@ -335,22 +313,30 @@ const renderSlot = (a, idx) => {
       const key = ev.currentTarget.dataset.pick;
       const set = toggleSel(actor.id, key);
       $(ev.currentTarget).toggleClass("com-picked", set.has(key));
-      
-      // Edit button: reveal input field
-grid.on("click.comArtifacts", ".com-edit-tag", (ev) => {
-  ev.preventDefault();
-  ev.stopPropagation();
+    });
 
-  const row = ev.currentTarget.closest(".tag-row");
-  if (!row) return;
+    // Edit button: show input temporarily
+    grid.off("click.comArtifactsEdit").on("click.comArtifactsEdit", ".com-edit-tag", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
 
-  const input = row.querySelector(".com-tag-input");
-  if (!input || input.disabled) return;
+      const editable = isSheetEditable(html);
+      if (!editable) return;
 
-  input.style.display = "";
-  input.focus();
-});
+      const $row = $(ev.currentTarget).closest(".tag-row");
+      $row.data("editing", 1);
 
+      const $input = $row.find("input.com-editor-only");
+      $input.show().focus();
+      syncTagRowUI($row, true);
+    });
+
+    // When leaving input (blur), stop editing + apply hide/show rules
+    grid.off("blur.comArtifactsEdit", "input.com-editor-only").on("blur.comArtifactsEdit", "input.com-editor-only", (ev) => {
+      const editable = isSheetEditable(html);
+      const $row = $(ev.currentTarget).closest(".tag-row");
+      $row.data("editing", 0);
+      syncTagRowUI($row, editable);
     });
 
     // Save changes (name fields / tag text fields only)
@@ -371,7 +357,7 @@ grid.on("click.comArtifacts", ".com-edit-tag", (ev) => {
 
       ref[lastKey] = ev.currentTarget.value;
 
-      // Update visible clickable label immediately (no waiting for re-render)
+      // Update visible clickable label immediately
       const $section = $(section);
       if (field === "power.0.name") $section.find(`.com-tag-pick[data-pick="a${idx}.p0"]`).text(ev.currentTarget.value.trim());
       if (field === "power.1.name") $section.find(`.com-tag-pick[data-pick="a${idx}.p1"]`).text(ev.currentTarget.value.trim());
@@ -380,8 +366,11 @@ grid.on("click.comArtifacts", ".com-edit-tag", (ev) => {
       await setArtifacts(actor, artifacts2);
       forceActivateTab(app, app._comLastTab);
 
-      // Re-apply lock behavior after update
+      // After saving, enforce the new "hide input if named" rule
       const editable = isSheetEditable(html);
+      $section.find(".tag-row").each((_, rowEl) => syncTagRowUI($(rowEl), editable));
+
+      // Re-apply lock behavior
       setArtifactsEditable(html, editable);
     });
 
@@ -419,10 +408,12 @@ grid.on("click.comArtifacts", ".com-edit-tag", (ev) => {
       forceActivateTab(app, app._comLastTab);
     });
 
-    // Apply lock state to Artifacts tab
+    // Apply lock state to Artifacts tab + sync per-row UI
     const editable = isSheetEditable(html);
     setArtifactsEditable(html, editable);
     installLockObserver(app, html);
+
+    grid.find(".tag-row").each((_, rowEl) => syncTagRowUI($(rowEl), editable));
 
   })();
 }
@@ -438,7 +429,6 @@ Hooks.on("renderActorSheet", (app, html) => {
 
   forceActivateTab(app, app._comLastTab);
 
-  // Keep lock sync even if CoM re-renders/changes DOM
   const editable = isSheetEditable(html);
   setArtifactsEditable(html, editable);
   installLockObserver(app, html);
@@ -484,13 +474,11 @@ Hooks.on("renderRollDialog", async (app, html) => {
     const form = html.find("form");
     if (!form.length) return;
 
-    // avoid duplicates on dialog refresh
     if (form.find(".com-artifacts-roll").length) return;
 
     const modInput = findCustomModifierInput(html);
     if (!modInput || !modInput.length) return;
 
-    // capture base once, prevent stacking
     if (!Number.isFinite(app._comArtifactsBaseMod)) {
       const base = Number(modInput.val() ?? 0);
       app._comArtifactsBaseMod = Number.isFinite(base) ? base : 0;
@@ -558,7 +546,6 @@ Hooks.on("renderRollDialog", async (app, html) => {
     recomputeAndApply();
     panel.on("change", "input.com-approve", recomputeAndApply);
 
-    // After roll is accepted, clear ONLY the client-side highlight selection (no actor writes)
     form.off("submit.comArtifacts").on("submit.comArtifacts", () => {
       clearSel(actor.id);
     });
@@ -567,3 +554,4 @@ Hooks.on("renderRollDialog", async (app, html) => {
     console.error("com-artifacts | renderRollDialog failed", e);
   }
 });
+
