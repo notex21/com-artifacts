@@ -44,13 +44,14 @@ function normalizeFlag(raw) {
     slot.id = String(src.id ?? slot.id);
     slot.img = String(src.img ?? slot.img);
 
-    const p = Array.isArray(src.power) ? src.power : [];
-    for (let j = 0; j < 2; j++) {
-      const pj = p[j] && typeof pj === "object" ? p[j] : {};
-      slot.power[j].name = String(pj.name ?? slot.power[j].name);
-      slot.power[j].selected = Boolean(pj.selected ?? slot.power[j].selected);
-      if (!slot.power[j].name) slot.power[j].selected = false;
-    }
+   const p = Array.isArray(src.power) ? src.power : [];
+for (let j = 0; j < 2; j++) {
+  const pj = (p[j] && typeof p[j] === "object") ? p[j] : {};
+  slot.power[j].name = String(pj.name ?? slot.power[j].name);
+  slot.power[j].selected = Boolean(pj.selected ?? slot.power[j].selected);
+  if (!slot.power[j].name) slot.power[j].selected = false;
+}
+
 
     const w = (src.weakness && typeof src.weakness === "object") ? src.weakness : {};
     slot.weakness.name = String(w.name ?? slot.weakness.name);
