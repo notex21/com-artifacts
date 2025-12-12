@@ -1,24 +1,20 @@
-/* com-artifacts | Foundry v13 build 350 | city-of-mist 4.0.4
- * - Adds an Artifacts tab with exactly 2 slots
- * - Each slot: image + 2 power tags + 1 weakness tag
- * - Click pen to name a tag; click tag name to toggle selected/highlight
+/* com-artifacts | Foundry v13 | City of Mist 4.0.4
+ * - 2 artifact slots (image + 2 power + 1 weakness)
+ * - Click pen to name; click tag to toggle selected
  * - Power selected = +1, Weakness selected = -1
- * - Player RollDialog: shows selected artifact tags and applies total to "Custom Modifier"
- * - GM TagReviewDialog: shows selected artifact tags (UI injection)
- *
- * Paste this as your entire main.js
+ * - Player RollDialog: show artifact tags + apply modifier to Custom Modifier input
+ * - GM TagReviewDialog: show artifact tags (UI injection)
  */
 
 const MOD_ID = "com-artifacts";
 const FLAG_SCOPE = MOD_ID;
 const FLAG_KEY = "data";
 
-/* ---------------- Utilities ---------------- */
+/* ---------------- Utils ---------------- */
 
-function asJQ(html) {
-  return (html && html.jquery) ? html : globalThis.jQuery(html);
+function asJQ(x) {
+  return (x && x.jquery) ? x : globalThis.jQuery(x);
 }
-
 function escapeHtml(str) {
   return String(str ?? "")
     .replaceAll("&", "&amp;")
@@ -27,12 +23,11 @@ function escapeHtml(str) {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
 }
-
 function randomID() {
   return foundry.utils.randomID?.() ?? Math.random().toString(36).slice(2);
 }
 
-/* ---------------- Data (flags) ---------------- */
+/* ---------------- Flags ---------------- */
 
 function normalizeFlag(raw) {
   const mkSlot = () => ({
@@ -71,14 +66,11 @@ function normalizeFlag(raw) {
 }
 
 async function getFlag(actor) {
-  const raw = actor.getFlag(FLAG_SCOPE, FLAG_KEY);
-  return normalizeFlag(raw);
+  return normalizeFlag(actor.getFlag(FLAG_SCOPE, FLAG_KEY));
 }
-
 async function setFlag(actor, data) {
   return actor.setFlag(FLAG_SCOPE, FLAG_KEY, normalizeFlag(data));
 }
-
 async function ensureNormalized(actor) {
   const raw = actor.getFlag(FLAG_SCOPE, FLAG_KEY);
   const norm = normalizeFlag(raw);
@@ -94,37 +86,34 @@ function computeSelected(flagData) {
   for (const slot of flagData.artifacts) {
     for (const p of slot.power) {
       if (p.name && p.selected) {
-        selected.push({ label: p.name, value: +1, kind: "power" });
+        selected.push({ label: p.name, value: +1 });
         mod += 1;
       }
     }
-    const w = slot.weakness;
-    if (w.name && w.selected) {
-      selected.push({ label: w.name, value: -1, kind: "weakness" });
+    if (slot.weakness.name && slot.weakness.selected) {
+      selected.push({ label: slot.weakness.name, value: -1 });
       mod -= 1;
     }
   }
-
   return { selected, mod };
 }
 
-/* ---------------- Actor resolution (CRITICAL for player side) ---------------- */
+/* ---------------- Actor resolution ---------------- */
 
 function resolveActorForApp(app) {
-  // This is the key: game.user.character is needed on player clients.
   return (
     app?.actor ||
     app?.options?.actor ||
     (app?.options?.actorId ? game.actors.get(app.options.actorId) : null) ||
     (app?.object?.actor ?? null) ||
     (app?.object && app?.object?.documentName === "Actor" ? app.object : null) ||
-    game.user?.character ||
+    game.user?.character ||                   // critical for players
     canvas?.tokens?.controlled?.[0]?.actor ||
     null
   );
 }
 
-/* ---------------- Sheet tab UI ---------------- */
+/* ---------------- Artifacts tab UI ---------------- */
 
 function isEditable(app) {
   if (typeof app.isEditable === "boolean") return app.isEditable;
@@ -192,10 +181,6 @@ function renderTabHtml(data, editable) {
 
             <div class="com-box-title" style="margin-top:10px;">Weakness Tag</div>
             <div class="com-box">${weaknessLine}</div>
-
-            <div style="margin-top:10px;opacity:.9;">
-              Selected modifier from artifacts: <b>${computeSelected(data).mod}</b>
-            </div>
           </div>
         </div>
       </div>`;
@@ -357,49 +342,67 @@ function wireSheetHandlers(app, $html, actor) {
   });
 }
 
-/* ---------------- RollDialog injection (Player side + GM side) ---------------- */
+/* ---------------- RollDialog: DOM-based injection with retries ---------------- */
 
-function findCustomModifierInput($html) {
-  // 1) Find exact label text "Custom Modifier"
-  const labels = $html.find("label");
-  for (const el of labels) {
+function findVisibleRollDialogRoot() {
+  // Find the most recent visible window that contains .roll-dialog
+  const $wins = globalThis.jQuery(".window-app:visible");
+  for (let i = $wins.length - 1; i >= 0; i--) {
+    const $w = globalThis.jQuery($wins[i]);
+    if ($w.find(".roll-dialog").length) return $w;
+  }
+  return globalThis.jQuery(); // empty
+}
+
+function findCustomModifierInput($root) {
+  // In CoM 4.0.4 it’s typically inside the roll dialog with label "Custom Modifier"
+  const $labels = $root.find("label");
+  for (const el of $labels) {
     const txt = (el.textContent ?? "").trim().toLowerCase();
     if (txt === "custom modifier") {
-      const input = asJQ(el).closest("div, label, .form-group, .form-fields, p").find("input").first();
-      if (input?.length) return input;
+      const $row = globalThis.jQuery(el).closest("div, label, .form-group, .form-fields, p");
+      const $inp = $row.find("input").first();
+      if ($inp.length) return $inp;
     }
   }
 
-  // 2) Placeholder/aria-label contains "modifier"
-  const inputs = $html.find("input");
-  for (const el of inputs) {
-    const $el = asJQ(el);
-    const ph = ($el.attr("placeholder") ?? "").toLowerCase();
-    const aria = ($el.attr("aria-label") ?? "").toLowerCase();
-    if (ph.includes("modifier") || aria.includes("modifier")) return $el;
-  }
+  // fallback: any input that looks like modifier
+  let $inp = $root.find('#roll-modifier-amt').first();
+  if ($inp.length) return $inp;
 
-  // 3) Last resort: first numeric/text input
-  return $html.find('input[type="number"], input[type="text"]').first();
+  $inp = $root.find('input[id*="modifier" i], input[name*="modifier" i]').first();
+  if ($inp.length) return $inp;
+
+  $inp = $root.find('input[type="number"], input[type="text"]').first();
+  return $inp;
 }
 
-async function injectIntoRollDialog(app, html) {
-  const $html = asJQ(html);
-
-  // Do not double inject
-  if ($html.find(".com-artifacts-inject").length) return;
+async function injectIntoRollDialogDOM(app, attempt = 0) {
+  // Retry a few times because on players the DOM is often attached slightly later
+  if (attempt > 12) return; // ~600ms total
 
   const actor = resolveActorForApp(app);
   if (!actor) return;
 
+  const $root = findVisibleRollDialogRoot();
+  if (!$root.length) {
+    return setTimeout(() => injectIntoRollDialogDOM(app, attempt + 1), 50);
+  }
+
+  const $roll = $root.find(".roll-dialog").first();
+  if (!$roll.length) {
+    return setTimeout(() => injectIntoRollDialogDOM(app, attempt + 1), 50);
+  }
+
+  // already injected?
+  if ($roll.find(".com-artifacts-inject").length) return;
+
   const flagData = await getFlag(actor);
   const { selected, mod } = computeSelected(flagData);
-
-  // If nothing selected, do nothing
   if (!selected.length && mod === 0) return;
 
-  const $form = $html.find("form").first();
-  if (!$form.length) return;
+  // Insert into modifier-list if present, else into roll root
+  const $host = $roll.find(".modifier-list").first().length ? $roll.find(".modifier-list").first() : $roll;
 
   const items = selected.map(t => {
     const sign = t.value > 0 ? "+1" : "-1";
@@ -409,18 +412,18 @@ async function injectIntoRollDialog(app, html) {
             </div>`;
   }).join("");
 
-  $form.append(`
-    <div class="com-artifacts-inject" style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.12);">
+  $host.append(`
+    <div class="com-artifacts-inject" style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,.12);">
       <div style="font-weight:700;margin-bottom:4px;">Artifact Tags</div>
       ${items || `<div style="opacity:.7;font-style:italic;">None selected.</div>`}
       <div style="margin-top:4px;opacity:.9;">Artifact modifier total: <b>${mod}</b></div>
     </div>
   `);
 
-  // Apply to "Custom Modifier" input
-  const $modInput = findCustomModifierInput($html);
+  // Apply modifier to Custom Modifier input
+  const $modInput = findCustomModifierInput($roll);
   if ($modInput?.length && mod !== 0) {
-    // store base value per dialog instance
+    // store base per dialog instance
     if (!Number.isFinite(app._comArtifactsBaseMod)) {
       const base = Number($modInput.val() ?? 0);
       app._comArtifactsBaseMod = Number.isFinite(base) ? base : 0;
@@ -431,12 +434,11 @@ async function injectIntoRollDialog(app, html) {
   }
 }
 
-/* ---------------- TagReviewDialog injection (GM approval window) ---------------- */
+/* ---------------- TagReviewDialog injection (GM window) ---------------- */
 
 async function injectIntoTagReviewDialog(app, html) {
   const $html = asJQ(html);
 
-  // Do not double inject
   if ($html.find(".com-artifacts-review").length) return;
 
   const actor = resolveActorForApp(app);
@@ -446,10 +448,9 @@ async function injectIntoTagReviewDialog(app, html) {
   const { selected, mod } = computeSelected(flagData);
   if (!selected.length && mod === 0) return;
 
-  // Try to put it near the SelectedItems column header if present
   const selectedHdr = $html.find("*").filter((_, el) => (el.textContent || "").trim() === "SelectedItems").first();
-  const host = selectedHdr.length ? selectedHdr.closest("div") : $html.find("form, .dialog-content").first();
-  if (!host.length) return;
+  const $host = selectedHdr.length ? selectedHdr.closest("div") : $html.find("form, .dialog-content").first();
+  if (!$host.length) return;
 
   const items = selected.map(t => {
     const sign = t.value > 0 ? "+1" : "-1";
@@ -461,7 +462,7 @@ async function injectIntoTagReviewDialog(app, html) {
             </div>`;
   }).join("");
 
-  host.append(`
+  $host.append(`
     <div class="com-artifacts-review" style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,.12);">
       <div style="font-weight:700;margin-bottom:4px;">Artifact Tags</div>
       ${items || `<div style="opacity:.7;font-style:italic;">None selected.</div>`}
@@ -480,18 +481,17 @@ Hooks.once("ready", async () => {
   }
 });
 
-Hooks.on("renderActorSheet", async (app, html) => { await upsertTab(app, html); });
-Hooks.on("renderActorSheetV2", async (app, html) => { await upsertTab(app, html); });
+Hooks.on("renderActorSheet", async (app, html) => upsertTab(app, html));
+Hooks.on("renderActorSheetV2", async (app, html) => upsertTab(app, html));
 
-// Most reliable in Foundry v13: all apps trigger this hook
 Hooks.on("renderApplication", (app, html) => {
   const name = app?.constructor?.name ?? "";
 
   if (name === "RollDialog") {
-    injectIntoRollDialog(app, html).catch(e => console.error(`${MOD_ID} | injectIntoRollDialog failed`, e));
+    injectIntoRollDialogDOM(app).catch(e => console.error(`${MOD_ID} | RollDialog inject failed`, e));
   }
 
   if (name === "TagReviewDialog") {
-    injectIntoTagReviewDialog(app, html).catch(e => console.error(`${MOD_ID} | injectIntoTagReviewDialog failed`, e));
+    injectIntoTagReviewDialog(app, html).catch(e => console.error(`${MOD_ID} | TagReview inject failed`, e));
   }
 });
