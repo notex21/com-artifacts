@@ -102,58 +102,56 @@ async function disarmArtifact(actor) {
  *
  * This avoids any dependence on CoM internal APIs.
  */
-Hooks.on("preCreateChatMessage", async (msg, data, options, userId) => {
+Hooks.on("preCreateChatMessage", async (doc, data, options, userId) => {
   try {
-    if (userId !== game.user.id) return; // only modify messages created by local user context
+    // 1. Ignore messages created by this module itself
+    if (data.flags?.["com-artifacts"]?.internal) return;
 
-    const speaker = data.speaker ?? msg.speaker;
+    // 2. Only react to messages that actually contain a roll
+    const rolls = data.rolls ?? [];
+    if (!Array.isArray(rolls) || rolls.length === 0) return;
+
+    // 3. Identify the actor
+    const speaker = data.speaker;
     const actorId = speaker?.actor;
     if (!actorId) return;
 
     const actor = game.actors.get(actorId);
     if (!actor) return;
 
-    const armed = await actor.getFlag(MODULE_ID, "armed");
-    if (!armed?.artifactSnapshot) return;
+    // 4. Check if an artifact is armed
+    const armed = await actor.getFlag("com-artifacts", "armed");
+    if (!armed) return;
 
-    // Only apply if this message is plausibly a roll or move output.
-    // CoM may post templated messages without rolls, so we still post the card.
+    // 5. Consume immediately (VERY IMPORTANT)
+    await actor.unsetFlag("com-artifacts", "armed");
+
     const artifact = armed.artifactSnapshot;
     const mod = Number(armed.modifier ?? 0);
 
-    // Post the card immediately
+    // 6. Post artifact card (marked as internal!)
     await ChatMessage.create({
       user: game.user.id,
       speaker: ChatMessage.getSpeaker({ actor }),
-      content: renderArtifactCard(actor.name, artifact, mod),
-      flags: { [MODULE_ID]: { type: "artifact-card", artifactIndex: armed.artifactIndex, modifier: mod } }
-    });
-
-    // If the message includes a standard Foundry roll, also post an adjusted roll
-    const rolls = data.rolls ?? msg.rolls;
-    if (Array.isArray(rolls) && rolls.length) {
-      const base = rolls[0];
-      const baseFormula = base?.formula ?? base?._formula;
-      if (baseFormula && typeof baseFormula === "string") {
-        try {
-          const adjusted = await (new Roll(`(${baseFormula}) + ${mod}`)).evaluate({ async: true });
-          await adjusted.toMessage({
-            speaker: ChatMessage.getSpeaker({ actor }),
-            flavor: `Adjusted Roll (Artifact: ${artifact.name ?? "Artifact"} ${mod >= 0 ? "+" : ""}${mod})`
-          });
-        } catch (e) {
-          // If adjusted roll fails, we still have the modifier card posted.
-          console.warn(`${MODULE_ID} | Adjusted roll failed`, e);
+      content: `
+        <div class="chat-card">
+          <header class="card-header">
+            <h3>Artifact Applied: ${artifact.name}</h3>
+          </header>
+          <div class="card-content">
+            <p><strong>Modifier:</strong> ${mod >= 0 ? "+" : ""}${mod}</p>
+          </div>
+        </div>
+      `,
+      flags: {
+        "com-artifacts": {
+          internal: true
         }
       }
-    }
+    });
 
-    // Auto-clear if "next"
-    if (armed.mode === "next") {
-      await actor.unsetFlag(MODULE_ID, "armed");
-    }
-  } catch (e) {
-    console.warn(`${MODULE_ID} | preCreateChatMessage error`, e);
+  } catch (err) {
+    console.error("com-artifacts hook error:", err);
   }
 });
 
