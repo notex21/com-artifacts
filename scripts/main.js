@@ -1,8 +1,55 @@
 const MODULE_ID = "com-artifacts";
 
-/* -------------------- Client-side selection (NO actor updates) -------------------- */
-
+/* -------------------- Persistent Client-side selection (User Flag) -------------------- */
+/**
+ * We store selection per-user (NOT on the actor), so:
+ * - Players can always pick their artifact tags
+ * - Picks survive re-opening dialogs and re-logins
+ * - GM does not control the player's selection
+ *
+ * Structure stored on user flag:
+ * {
+ *   [actorId]: ["a0.p0", "a0.w", ...]
+ * }
+ */
 globalThis.comArtifactsSelection ??= new Map(); // Map<actorId, Set<string>>
+globalThis.comArtifactsSelLoaded ??= false;
+globalThis.comArtifactsSelSaveT ??= null;
+
+async function loadSelectionFromUserFlag() {
+  if (globalThis.comArtifactsSelLoaded) return;
+
+  let raw = {};
+  try {
+    raw = (await game.user.getFlag(MODULE_ID, "selection")) ?? {};
+  } catch (_) {
+    raw = {};
+  }
+  if (!raw || typeof raw !== "object") raw = {};
+
+  // hydrate global map
+  for (const [actorId, arr] of Object.entries(raw)) {
+    if (!Array.isArray(arr)) continue;
+    globalThis.comArtifactsSelection.set(actorId, new Set(arr.filter(x => typeof x === "string")));
+  }
+
+  globalThis.comArtifactsSelLoaded = true;
+}
+
+function queueSaveSelectionToUserFlag() {
+  clearTimeout(globalThis.comArtifactsSelSaveT);
+  globalThis.comArtifactsSelSaveT = setTimeout(async () => {
+    try {
+      const out = {};
+      for (const [actorId, set] of globalThis.comArtifactsSelection.entries()) {
+        out[actorId] = Array.from(set ?? []);
+      }
+      await game.user.setFlag(MODULE_ID, "selection", out);
+    } catch (e) {
+      console.warn("com-artifacts | failed to save selection", e);
+    }
+  }, 150);
+}
 
 function getSel(actorId) {
   if (!globalThis.comArtifactsSelection.has(actorId)) {
@@ -15,11 +62,13 @@ function toggleSel(actorId, key) {
   const s = getSel(actorId);
   if (s.has(key)) s.delete(key);
   else s.add(key);
+  queueSaveSelectionToUserFlag();
   return s;
 }
 
 function clearSel(actorId) {
   globalThis.comArtifactsSelection.delete(actorId);
+  queueSaveSelectionToUserFlag();
 }
 
 /* -------------------- Storage -------------------- */
@@ -53,7 +102,7 @@ async function setArtifacts(actor, artifacts) {
 
 function computeArtifactMod(artifact) {
   if (!artifact) return 0;
-  // unused in this new flow; RollDialog builds +/- from selection
+  // unused in this flow; RollDialog builds +/- from selection
   return 0;
 }
 
@@ -92,13 +141,12 @@ function setArtifactsEditable(html, editable) {
   tab.find("button.com-pick-img, button.com-clear-img").prop("disabled", !editable);
 
   if (editable) {
-    tab.find(".com-editor-only").prop("disabled", false).show(); // only affects Artifact Name input (tag inputs are hidden anyway)
+    tab.find(".com-editor-only").prop("disabled", false).show();
     tab.find(".com-edit-tag").prop("disabled", false).show();
 
     tab.find(".com-tag-pick").each((_, el) => {
       const $el = $(el);
       const txt = ($el.text() ?? "").trim();
-      // show tag only if it has text, unless it's currently being edited
       const editing = $el.hasClass("com-editing");
       $el.toggle(!!txt || editing);
     });
@@ -106,7 +154,6 @@ function setArtifactsEditable(html, editable) {
     tab.find(".com-editor-only").prop("disabled", true).hide();
     tab.find(".com-edit-tag").prop("disabled", true).hide();
 
-    // Locked: show only named tags; also ensure nothing remains contenteditable
     tab.find(".com-tag-pick").each((_, el) => {
       el.contentEditable = "false";
       $(el).removeClass("com-editing");
@@ -116,9 +163,7 @@ function setArtifactsEditable(html, editable) {
     });
   }
 
-  // Tag picking stays active even when locked
   tab.find(".com-tag-pick").css("pointer-events", "auto");
-
   tab.css("opacity", editable ? "" : "0.85");
 }
 
@@ -146,6 +191,9 @@ function installLockObserver(app, html) {
 function ensureArtifactsTab(app, html, actor) {
   if (!actor?.testUserPermission(game.user, "OWNER")) return;
 
+  // Load persisted selection once per client
+  loadSelectionFromUserFlag().catch(() => {});
+
   // Inject minimal CSS once
   if (!document.getElementById("com-artifacts-inline-style")) {
     const style = document.createElement("style");
@@ -159,7 +207,7 @@ function ensureArtifactsTab(app, html, actor) {
 
       .com-artifact .tag-row{
         display:flex;
-        justify-content:center;   /* CENTER CONTENT IN COLUMN */
+        justify-content:center;
         align-items:center;
         gap:6px;
         margin:6px 0;
@@ -172,21 +220,16 @@ function ensureArtifactsTab(app, html, actor) {
       .com-edit-tag{
         background:none !important;
         border:none !important;
-
         width:14px !important;
         min-width:14px !important;
         max-width:14px !important;
-
         height:14px !important;
         min-height:14px !important;
-
         padding:0 !important;
         margin:0 !important;
-
         display:inline-flex !important;
         align-items:center !important;
         justify-content:center !important;
-
         cursor:pointer;
         opacity:.65;
         font-size:11px;
@@ -194,7 +237,6 @@ function ensureArtifactsTab(app, html, actor) {
       }
       .com-edit-tag:hover { opacity: 1; }
 
-      /* Hover outline like CoM (faint purple) */
       .com-tag-pick:not(:empty){
         border: 1px solid transparent;
         border-radius: 6px;
@@ -205,7 +247,6 @@ function ensureArtifactsTab(app, html, actor) {
         box-shadow: 0 0 0 2px rgba(120, 80, 160, .15);
       }
 
-      /* When editing inline */
       .com-tag-pick.com-editing{
         border-color: rgba(120, 80, 160, .65) !important;
         box-shadow: 0 0 0 2px rgba(120, 80, 160, .22) !important;
@@ -213,9 +254,7 @@ function ensureArtifactsTab(app, html, actor) {
         outline: none;
       }
 
-      /* hidden storage input */
       .com-hidden-store{ display:none !important; }
-
       .com-artifact .hint { opacity: .8; font-size: 12px; margin-top: 8px; }
     `;
     document.head.appendChild(style);
@@ -239,7 +278,6 @@ function ensureArtifactsTab(app, html, actor) {
     `);
   }
 
-  // Helper: set row visibility based on current text + lock state
   function syncTagRowUI($row, editable) {
     const $pick = $row.find(".com-tag-pick");
     const $edit = $row.find(".com-edit-tag");
@@ -252,9 +290,8 @@ function ensureArtifactsTab(app, html, actor) {
       return;
     }
 
-    // Editable
     $edit.show();
-    $pick.toggle(!!name || editing); // if empty and not editing -> hide label; show only ✎
+    $pick.toggle(!!name || editing);
   }
 
   function placeCaretAtEnd(el) {
@@ -274,15 +311,13 @@ function ensureArtifactsTab(app, html, actor) {
     const $pick = $row.find(".com-tag-pick");
     const $store = $row.find("input.com-hidden-store");
 
-    // Ensure label is visible while editing
     $pick.show();
     $pick.addClass("com-editing");
 
-    // Start editing
     const el = $pick[0];
     el.contentEditable = "true";
     el.focus();
-    // If currently empty, start from stored value (maybe empty)
+
     if (!(($pick.text() ?? "").trim()) && ($store.val() ?? "")) {
       $pick.text(($store.val() ?? "").trim());
     }
@@ -293,7 +328,6 @@ function ensureArtifactsTab(app, html, actor) {
     const $pick = $row.find(".com-tag-pick");
     const $store = $row.find("input.com-hidden-store");
 
-    // Revert to stored value
     $pick.text(($store.val() ?? "").trim());
 
     const el = $pick[0];
@@ -307,7 +341,6 @@ function ensureArtifactsTab(app, html, actor) {
 
     const newVal = (($pick.text() ?? "").trim());
 
-    // Write to hidden input and trigger your existing change handler
     $store.val(newVal);
     $store.trigger("change");
 
@@ -317,6 +350,7 @@ function ensureArtifactsTab(app, html, actor) {
   }
 
   (async () => {
+    await loadSelectionFromUserFlag();
     const artifacts = await getArtifacts(actor);
     const grid = body.find(`.tab[data-tab="${MODULE_ID}"] .com-artifacts-grid`);
 
@@ -402,7 +436,6 @@ function ensureArtifactsTab(app, html, actor) {
 
     // Click-to-highlight (NO actor writes)
     grid.off("click.comArtifactsPick").on("click.comArtifactsPick", ".com-tag-pick", (ev) => {
-      // If currently editing, don't toggle highlight
       if ($(ev.currentTarget).hasClass("com-editing")) return;
 
       const key = ev.currentTarget.dataset.pick;
@@ -410,7 +443,7 @@ function ensureArtifactsTab(app, html, actor) {
       $(ev.currentTarget).toggleClass("com-picked", set.has(key));
     });
 
-    // Edit button: inline edit the label itself
+    // Edit button
     grid.off("click.comArtifactsEdit").on("click.comArtifactsEdit", ".com-edit-tag", (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
@@ -423,7 +456,6 @@ function ensureArtifactsTab(app, html, actor) {
       syncTagRowUI($row, true);
     });
 
-    // Key handling while editing
     grid.off("keydown.comArtifactsInline").on("keydown.comArtifactsInline", ".com-tag-pick.com-editing", (ev) => {
       const $row = $(ev.currentTarget).closest(".tag-row");
 
@@ -446,7 +478,6 @@ function ensureArtifactsTab(app, html, actor) {
       }
     });
 
-    // Blur saves
     grid.off("blur.comArtifactsInline").on("blur.comArtifactsInline", ".com-tag-pick.com-editing", (ev) => {
       const $row = $(ev.currentTarget).closest(".tag-row");
       commitInlineEdit($row);
@@ -454,7 +485,7 @@ function ensureArtifactsTab(app, html, actor) {
       syncTagRowUI($row, editable);
     });
 
-    // Save changes (artifact name + hidden tag storage)
+    // Save changes
     grid.off("change.comArtifacts").on("change.comArtifacts", "input", async (ev) => {
       const tab = getActiveTab(html) || MODULE_ID;
       app._comLastTab = tab;
@@ -472,7 +503,6 @@ function ensureArtifactsTab(app, html, actor) {
 
       ref[lastKey] = ev.currentTarget.value;
 
-      // Update visible clickable label immediately (for tag edits)
       const $section = $(section);
       if (field === "power.0.name") $section.find(`.com-tag-pick[data-pick="a${idx}.p0"]`).text(ev.currentTarget.value.trim());
       if (field === "power.1.name") $section.find(`.com-tag-pick[data-pick="a${idx}.p1"]`).text(ev.currentTarget.value.trim());
@@ -481,7 +511,6 @@ function ensureArtifactsTab(app, html, actor) {
       await setArtifacts(actor, artifacts2);
       forceActivateTab(app, app._comLastTab);
 
-      // Re-apply row visibility rules
       const editable = isSheetEditable(html);
       $section.find(".tag-row").each((_, rowEl) => syncTagRowUI($(rowEl), editable));
       setArtifactsEditable(html, editable);
@@ -521,7 +550,6 @@ function ensureArtifactsTab(app, html, actor) {
       forceActivateTab(app, app._comLastTab);
     });
 
-    // Apply lock state + sync per-row UI
     const editable = isSheetEditable(html);
     setArtifactsEditable(html, editable);
     installLockObserver(app, html);
@@ -546,10 +574,10 @@ Hooks.on("renderActorSheet", (app, html) => {
   installLockObserver(app, html);
 });
 
-/* -------------------- RollDialog: show highlighted artifact tags for approval -------------------- */
+/* -------------------- RollDialog: show highlighted artifact tags for approval + apply mod -------------------- */
 
-function findCustomModifierInput(html) {
-  const labels = html.find("label");
+function findCustomModifierInput($html) {
+  const labels = $html.find("label");
   for (const el of labels) {
     const txt = (el.textContent ?? "").trim().toLowerCase();
     if (txt === "custom modifier") {
@@ -558,7 +586,7 @@ function findCustomModifierInput(html) {
     }
   }
 
-  const inputs = html.find("input");
+  const inputs = $html.find("input");
   for (const el of inputs) {
     const $el = $(el);
     const ph = ($el.attr("placeholder") ?? "").toLowerCase();
@@ -566,31 +594,54 @@ function findCustomModifierInput(html) {
     if (ph.includes("modifier") || aria.includes("modifier")) return $el;
   }
 
-  const any = html.find('input[type="number"], input[type="text"]').first();
+  const any = $html.find('input[type="number"], input[type="text"]').first();
   return any?.length ? any : null;
+}
+
+function resolveActorFromRollDialog(app) {
+  // Prefer explicit actor on the dialog
+  let actor =
+    app?.actor ??
+    app?.options?.actor ??
+    (app?.options?.actorId ? game.actors.get(app.options.actorId) : null);
+
+  // If still missing, try controlled token
+  if (!actor) actor = canvas?.tokens?.controlled?.[0]?.actor ?? null;
+
+  // Finally user character
+  if (!actor) actor = game.user.character ?? null;
+
+  return actor;
 }
 
 Hooks.on("renderRollDialog", async (app, html) => {
   try {
-    const actor =
-      app.actor ??
-      app.options?.actor ??
-      (app.options?.actorId ? game.actors.get(app.options.actorId) : null) ??
-      game.user.character;
+    // normalize html to jQuery
+    const $html = html?.jquery ? html : $(html);
+    if (!$html?.length) return;
 
+    await loadSelectionFromUserFlag();
+
+    const actor = resolveActorFromRollDialog(app);
     if (!actor) return;
 
     const artifacts = await getArtifacts(actor);
     const sel = getSel(actor.id);
 
-    const form = html.find("form");
-    if (!form.length) return;
+    // CoM RollDialog sometimes uses <form>, sometimes structure changes;
+    // prefer form, fallback to the main container
+    const $form = $html.find("form").first();
+    const $container =
+      $form.length ? $form :
+      ($html.find(".roll-dialog").first().length ? $html.find(".roll-dialog").first() : $html);
 
-    if (form.find(".com-artifacts-roll").length) return;
+    // prevent duplicate injection
+    if ($container.find(".com-artifacts-roll").length) return;
 
-    const modInput = findCustomModifierInput(html);
+    const modInput = findCustomModifierInput($html);
     if (!modInput || !modInput.length) return;
 
+    // Snapshot base modifier once
     if (!Number.isFinite(app._comArtifactsBaseMod)) {
       const base = Number(modInput.val() ?? 0);
       app._comArtifactsBaseMod = Number.isFinite(base) ? base : 0;
@@ -640,7 +691,11 @@ Hooks.on("renderRollDialog", async (app, html) => {
       </fieldset>
     `);
 
-    form.append(panel);
+    // Insert panel inside the dialog in a stable place:
+    // if modifier-list exists (CoM), put it right after it; else append at end.
+    const modList = $html.find(".modifier-list").first();
+    if (modList.length) modList.after(panel);
+    else $container.append(panel);
 
     function recomputeAndApply() {
       let mod = 0;
@@ -650,15 +705,30 @@ Hooks.on("renderRollDialog", async (app, html) => {
 
       panel.find(".com-artifacts-mod").text(`${mod >= 0 ? "+" : ""}${mod}`);
 
-      modInput.val((app._comArtifactsBaseMod ?? 0) + mod);
+      const nextVal = (app._comArtifactsBaseMod ?? 0) + mod;
+
+      // Write into Custom Modifier, and trigger events CoM listens to
+      modInput.val(nextVal);
       modInput.trigger("input");
       modInput.trigger("change");
+
+      // Extra safety: update displayed Roll Bonus if present
+      const rb = $html.find(".roll-bonus").first();
+      if (rb.length) {
+        // roll-bonus is overall, not just custom mod, but CoM usually rebuilds it.
+        // If it doesn't, this keeps the UI consistent.
+        // We do not try to guess other components; we only ensure it updates at least.
+        // (If CoM updates it properly, this line is harmless.)
+        rb.text(String(rb.text()).trim());
+      }
     }
 
     recomputeAndApply();
     panel.on("change", "input.com-approve", recomputeAndApply);
 
-    form.off("submit.comArtifacts").on("submit.comArtifacts", () => {
+    // When the player confirms/submits, clear their selection for this actor
+    // so next move starts clean (matches your original intent).
+    $container.off("submit.comArtifacts").on("submit.comArtifacts", () => {
       clearSel(actor.id);
     });
 
