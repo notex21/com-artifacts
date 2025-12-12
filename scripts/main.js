@@ -329,13 +329,32 @@ function comComputeArtifactMod(artifact) {
 }
 
 function comFindModInput(html) {
-  // Try the most common input names used by roll dialogs
-  const candidates = [
-    'input[name="modifier"]',
-    'input[name="mod"]',
-    'input[name="bonus"]',
-    'input[name="rollMod"]',
-    'input[name="rollModifier"]'
+  // City of Mist RollDialog: "Custom Modifier" is the input we must change.
+  // It is the number input directly under the label "Custom Modifier".
+  // We'll locate it by finding the label text, then the next input.
+  const labels = html.find("label");
+  for (const el of labels) {
+    const txt = (el.textContent ?? "").trim().toLowerCase();
+    if (txt === "custom modifier") {
+      const input = $(el).closest(".form-group, .form-fields, div").find("input").first();
+      if (input?.length) return input;
+    }
+  }
+
+  // Fallback: look for any input whose placeholder or aria-label hints modifier
+  const candidates = html.find('input');
+  for (const el of candidates) {
+    const $el = $(el);
+    const ph = ($el.attr("placeholder") ?? "").toLowerCase();
+    const aria = ($el.attr("aria-label") ?? "").toLowerCase();
+    if (ph.includes("modifier") || aria.includes("modifier")) return $el;
+  }
+
+  // Last resort: first text/number input
+  const any = html.find('input[type="number"], input[type="text"]').first();
+  return any?.length ? any : null;
+}
+
   ];
 
   for (const sel of candidates) {
@@ -413,25 +432,27 @@ Hooks.on("renderRollDialog", async (app, html) => {
 
     // Intercept submit: add artifact mod into the modifier field right before rolling
     // We hook the submit button click so it works regardless of RollDialog internals.
-    const submitButtons = html.find('button[type="submit"], button.roll, button[name="roll"]');
+    const submitButtons = html.find('button:contains("Confirm"), button[type="submit"]');
 
     submitButtons.on("click.comArtifacts", () => {
-      const mod = updateDisplayedMod();
-      if (!mod) return;
+  const mod = updateDisplayedMod();
+  if (!mod) return;
 
-      if (!modInput || !modInput.length) {
-        ui.notifications?.warn("Artifacts: Could not find a modifier input in this RollDialog.");
-        return;
-      }
+  if (!modInput || !modInput.length) {
+    ui.notifications?.warn("Artifacts: Could not find Custom Modifier input in this RollDialog.");
+    return;
+  }
 
-      const current = Number(modInput.val() ?? 0);
-      const next = (Number.isFinite(current) ? current : 0) + mod;
-      modInput.val(next);
+  const current = Number(modInput.val() ?? 0);
+  const next = (Number.isFinite(current) ? current : 0) + mod;
 
-      // Optional: small visual confirmation in the dialog
-      // (prevents “did it apply?” confusion)
-      panel.find(".com-artifacts-mod").text(`${mod >= 0 ? "+" : ""}${mod} (applied)`);
-    });
+  modInput.val(next);
+  modInput.trigger("change");   // IMPORTANT: many dialogs read on change
+  modInput.trigger("input");    // also fire input event
+
+  panel.find(".com-artifacts-mod").text(`${mod >= 0 ? "+" : ""}${mod} (applied)`);
+});
+
 
   } catch (e) {
     console.error("com-artifacts | renderRollDialog failed", e);
