@@ -1,0 +1,60 @@
+.com-artifacts-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.com-artifact {
+  border: 1px solid var(--color-border-light-primary);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.com-artifact header {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.com-artifact .img {
+  width: 64px;
+  height: 64px;
+  border: 1px solid var(--color-border-light-primary);
+  border-radius: 6px;
+  background-size: cover;
+  background-position: center;
+  flex: 0 0 auto;
+}
+
+.com-artifact .name input {
+  width: 100%;
+}
+
+.com-artifact .tags {
+  margin-top: 10px;
+}
+
+.com-artifact .tag-row {
+  display: grid;
+  grid-template-columns: 26px 1fr;
+  gap: 8px;
+  align-items: center;
+  margin: 6px 0;
+}
+
+.com-artifact .tag-row input[type="text"] {
+  width: 100%;
+}
+
+.com-artifact .controls {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.com-artifact .hint {
+  opacity: 0.8;
+  font-size: 12px;
+  margin-top: 6px;
+}
