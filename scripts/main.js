@@ -40,6 +40,21 @@ function computeArtifactMod(artifact) {
   return mod;
 }
 
+/* -------------------- NEW: Tab preservation helpers -------------------- */
+
+function getActiveTab(html) {
+  return html.find('nav.sheet-tabs a.item.active, nav.tabs a.item.active').data("tab");
+}
+
+function forceActivateTab(app, tab) {
+  const tabs = app?._tabs?.[0];
+  if (!tabs || !tab) return;
+  // Must be deferred, because the CoM sheet activates its default tab during render
+  setTimeout(() => {
+    try { tabs.activate(tab); } catch (_) {}
+  }, 0);
+}
+
 /* -------------------- Sheet UI: Add "Artifacts" tab -------------------- */
 
 function ensureArtifactsTab(app, html, actor) {
@@ -116,8 +131,12 @@ function ensureArtifactsTab(app, html, actor) {
 
     grid.html(artifacts.map(renderSlot).join(""));
 
-    // Save changes
+    // Save changes (UPDATED: preserve current tab)
     grid.off("change.comArtifacts").on("change.comArtifacts", "input", async (ev) => {
+      // Remember which tab you were on before the actor update triggers re-render
+      const tab = getActiveTab(html) || MODULE_ID;
+      app._comLastTab = tab;
+
       const section = ev.currentTarget.closest(".com-artifact");
       const idx = Number(section.dataset.idx);
       const field = ev.currentTarget.dataset.field;
@@ -133,10 +152,16 @@ function ensureArtifactsTab(app, html, actor) {
       else ref[lastKey] = ev.currentTarget.value;
 
       await setArtifacts(actor, artifacts2);
+
+      // Force back to the same tab after re-render
+      forceActivateTab(app, app._comLastTab);
     });
 
-    // Image pick/clear
+    // Image pick/clear (UPDATED: preserve tab)
     grid.off("click.comArtifacts").on("click.comArtifacts", ".com-pick-img", async (ev) => {
+      const tab = getActiveTab(html) || MODULE_ID;
+      app._comLastTab = tab;
+
       const section = ev.currentTarget.closest(".com-artifact");
       const idx = Number(section.dataset.idx);
       const artifacts2 = await getArtifacts(actor);
@@ -148,17 +173,22 @@ function ensureArtifactsTab(app, html, actor) {
           artifacts2[idx].img = path;
           await setArtifacts(actor, artifacts2);
           app.render(false);
+          forceActivateTab(app, app._comLastTab);
         }
       }).browse();
     });
 
     grid.on("click.comArtifacts", ".com-clear-img", async (ev) => {
+      const tab = getActiveTab(html) || MODULE_ID;
+      app._comLastTab = tab;
+
       const section = ev.currentTarget.closest(".com-artifact");
       const idx = Number(section.dataset.idx);
       const artifacts2 = await getArtifacts(actor);
       artifacts2[idx].img = "";
       await setArtifacts(actor, artifacts2);
       app.render(false);
+      forceActivateTab(app, app._comLastTab);
     });
   })();
 }
@@ -166,7 +196,15 @@ function ensureArtifactsTab(app, html, actor) {
 Hooks.on("renderActorSheet", (app, html) => {
   const actor = app?.actor;
   if (!actor) return;
+
+  // Remember active tab on every render, so we can restore it after updates
+  const tab = getActiveTab(html);
+  if (tab) app._comLastTab = tab;
+
   ensureArtifactsTab(app, html, actor);
+
+  // If we have a remembered tab, keep it active
+  forceActivateTab(app, app._comLastTab);
 });
 
 /* -------------------- RollDialog: Inject artifact modifier into Custom Modifier -------------------- */
@@ -240,19 +278,19 @@ Hooks.on("renderRollDialog", async (app, html) => {
 
     const modInput = findCustomModifierInput(html);
 
-    function getSelectedMod() {
+    function getSelectedSlotAndMod() {
       const slot = Number(panel.find('select[name="comArtifactSlot"]').val());
       let mod = 0;
       if (slot === 0 || slot === 1) mod = computeArtifactMod(artifacts[slot]);
       const sign = mod >= 0 ? "+" : "";
       panel.find(".com-artifacts-mod").text(`${sign}${mod}`);
-      return mod;
+      return { slot, mod };
     }
 
-    getSelectedMod();
+    getSelectedSlotAndMod();
 
     panel.on("change", 'select[name="comArtifactSlot"]', () => {
-      getSelectedMod();
+      getSelectedSlotAndMod();
     });
 
     // Hook Confirm specifically (CoM dialog uses Confirm)
@@ -260,8 +298,8 @@ Hooks.on("renderRollDialog", async (app, html) => {
     if (!confirmBtn.length) return;
 
     // Avoid double-binding if the dialog re-renders
-    confirmBtn.off("click.comArtifacts").on("click.comArtifacts", () => {
-      const mod = getSelectedMod();
+    confirmBtn.off("click.comArtifacts").on("click.comArtifacts", async () => {
+      const { slot, mod } = getSelectedSlotAndMod();
       if (!mod) return;
 
       if (!modInput || !modInput.length) {
@@ -277,9 +315,18 @@ Hooks.on("renderRollDialog", async (app, html) => {
       modInput.trigger("change");
 
       panel.find(".com-artifacts-mod").text(`${mod >= 0 ? "+" : ""}${mod} (applied)`);
+
+      // NEW: auto-uncheck used artifact toggles after the roll
+      if (slot === 0 || slot === 1) {
+        const artifacts2 = await getArtifacts(actor);
+        for (const p of artifacts2[slot].power ?? []) p.active = false;
+        if (artifacts2[slot].weakness) artifacts2[slot].weakness.active = false;
+        await setArtifacts(actor, artifacts2);
+      }
     });
 
   } catch (e) {
     console.error("com-artifacts | renderRollDialog failed", e);
   }
 });
+
