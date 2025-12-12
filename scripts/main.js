@@ -322,18 +322,4 @@ Hooks.on("renderRollDialog", async (app, html) => {
 
     // Auto-uncheck used artifact toggles AFTER submitting the roll
     // We hook submit, not the Confirm button label, so localization won’t break.
-    form.off("submit.comArtifacts").on("submit.comArtifacts", async () => {
-      const { slot } = applyArtifactToDialog();
-
-      if (slot === 0 || slot === 1) {
-        const artifacts2 = await getArtifacts(actor);
-        for (const p of artifacts2[slot].power ?? []) p.active = false;
-        if (artifacts2[slot].weakness) artifacts2[slot].weakness.active = false;
-        await setArtifacts(actor, artifacts2);
-      }
-    });
-
-  } catch (e) {
-    console.error("com-artifacts | renderRollDialog failed", e);
-  }
 });
