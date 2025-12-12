@@ -188,6 +188,25 @@ function ensureArtifactsTab(app, html, actor) {
   font-size:11px;
   line-height:1;
 }
+/* Hover outline like CoM (faint purple) */
+.com-tag-pick:not(:empty){
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 2px 8px;
+}
+.com-tag-pick:not(:empty):hover{
+  border-color: rgba(120, 80, 160, .45);
+  box-shadow: 0 0 0 2px rgba(120, 80, 160, .15);
+}
+
+/* When editing inline */
+.com-tag-pick.com-editing{
+  border-color: rgba(120, 80, 160, .65) !important;
+  box-shadow: 0 0 0 2px rgba(120, 80, 160, .22) !important;
+  background: rgba(120, 80, 160, .06);
+  outline: none;
+}
+
 
       .com-edit-tag:hover { opacity: 1; }
 
@@ -256,20 +275,32 @@ function ensureArtifactsTab(app, html, actor) {
     const grid = body.find(`.tab[data-tab="${MODULE_ID}"] .com-artifacts-grid`);
 
     const renderTagRow = ({ idx, pickKey, isWeak, field, value, placeholder }) => {
-      const label = ((value ?? "").trim());
-      const hasValue = !!label;
+  const label = ((value ?? "").trim());
+  const hasValue = !!label;
 
-      return `
-        <div class="tag-row" data-field="${field}">
-          <span class="com-tag-pick ${isWeak ? "com-weak" : ""}" data-pick="${pickKey}">${Handlebars.escapeExpression(label)}</span>
-          <button type="button" class="com-edit-tag" title="Edit" ${hasValue ? "" : "style=\"display:none;\""}>✎</button>
-          <input class="com-editor-only" type="text" data-field="${field}"
-            value="${Handlebars.escapeExpression(value ?? "")}"
-            placeholder="${Handlebars.escapeExpression(placeholder)}"
-            ${hasValue ? "style=\"display:none;\"" : ""}/>
-        </div>
-      `;
-    };
+  return `
+    <div class="tag-row" data-field="${field}">
+      <span
+        class="com-tag-pick ${isWeak ? "com-weak" : ""}"
+        data-pick="${pickKey}"
+        style="${hasValue ? "" : "display:none;"}"
+      >${Handlebars.escapeExpression(label)}</span>
+
+      <button type="button"
+        class="com-edit-tag"
+        title="${hasValue ? "Edit" : "Add"}"
+      >✎</button>
+
+      <!-- hidden storage input, never shown -->
+      <input class="com-editor-only com-hidden-store" type="text" data-field="${field}"
+        value="${Handlebars.escapeExpression(value ?? "")}"
+        placeholder="${Handlebars.escapeExpression(placeholder)}"
+        style="display:none;"
+      />
+    </div>
+  `;
+};
+
 
     const renderSlot = (a, idx) => {
       const imgStyle = a.img ? `style="background-image:url('${a.img.replace(/'/g, "%27")}')"` : "";
