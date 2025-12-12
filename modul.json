@@ -1,0 +1,15 @@
+{
+  "id": "com-artifacts",
+  "title": "City of Mist – Artifacts",
+  "description": "Adds two Artifact slots to City of Mist character sheets.",
+  "version": "0.1.0",
+  "authors": [{ "name": "Local" }],
+  "compatibility": {
+    "minimum": "13",
+    "verified": "13"
+  },
+  "esmodules": ["scripts/main.js"],
+  "styles": ["styles/artifacts.css"],
+  "manifest": "https://raw.githubusercontent.com/notex21/com-artifacts/main/module.json",
+  "download": "https://github.com/notex21/com-artifacts/archive/refs/heads/main.zip"
+}
