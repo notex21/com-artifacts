@@ -92,19 +92,24 @@ function setArtifactsEditable(html, editable) {
   tab.find("button.com-pick-img, button.com-clear-img").prop("disabled", !editable);
 
   if (editable) {
-    // Enable editor-only controls, but visibility is handled per-row by UI logic
-    tab.find(".com-editor-only").prop("disabled", false);
+    tab.find(".com-editor-only").prop("disabled", false).show(); // only affects Artifact Name input (tag inputs are hidden anyway)
     tab.find(".com-edit-tag").prop("disabled", false).show();
 
-    // In edit mode, keep clickable tags visible (even if empty will be hidden by row UI)
-    tab.find(".com-tag-pick").show();
+    tab.find(".com-tag-pick").each((_, el) => {
+      const $el = $(el);
+      const txt = ($el.text() ?? "").trim();
+      // show tag only if it has text, unless it's currently being edited
+      const editing = $el.hasClass("com-editing");
+      $el.toggle(!!txt || editing);
+    });
   } else {
-    // Hide ALL inputs/buttons that allow editing
     tab.find(".com-editor-only").prop("disabled", true).hide();
     tab.find(".com-edit-tag").prop("disabled", true).hide();
 
-    // Hide empty labels when locked (only show written names)
+    // Locked: show only named tags; also ensure nothing remains contenteditable
     tab.find(".com-tag-pick").each((_, el) => {
+      el.contentEditable = "false";
+      $(el).removeClass("com-editing");
       const $el = $(el);
       const txt = ($el.text() ?? "").trim();
       $el.toggle(!!txt);
@@ -151,64 +156,65 @@ function ensureArtifactsTab(app, html, actor) {
       .com-artifact header { display:flex; gap:10px; align-items:center; }
       .com-artifact .img { width:64px; height:64px; border:1px solid var(--color-border-light-primary); border-radius:6px; background-size:cover; background-position:center; }
       .com-artifact .controls { display:flex; gap:8px; margin-top:8px; }
-      .com-artifact .tag-row{
-  display:flex;
-  justify-content:center;   /* CENTER CONTENT IN COLUMN */
-  align-items:center;
-  gap:6px;
-  margin:6px 0;
-}
 
-      .com-artifact .tag-row input[type="text"] { flex: 1; }
+      .com-artifact .tag-row{
+        display:flex;
+        justify-content:center;   /* CENTER CONTENT IN COLUMN */
+        align-items:center;
+        gap:6px;
+        margin:6px 0;
+      }
 
       .com-tag-pick { display:inline-block; padding:2px 6px; border-radius:4px; cursor:pointer; user-select:none; }
       .com-tag-pick.com-picked { background: #ffeb3b; }
       .com-tag-pick.com-weak.com-picked { background: #ffd54f; }
 
       .com-edit-tag{
-  background:none !important;
-  border:none !important;
+        background:none !important;
+        border:none !important;
 
-  width:14px !important;
-  min-width:14px !important;
-  max-width:14px !important;
+        width:14px !important;
+        min-width:14px !important;
+        max-width:14px !important;
 
-  height:14px !important;
-  min-height:14px !important;
+        height:14px !important;
+        min-height:14px !important;
 
-  padding:0 !important;
-  margin:0 !important;
+        padding:0 !important;
+        margin:0 !important;
 
-  display:inline-flex !important;
-  align-items:center !important;
-  justify-content:center !important;
+        display:inline-flex !important;
+        align-items:center !important;
+        justify-content:center !important;
 
-  cursor:pointer;
-  opacity:.65;
-  font-size:11px;
-  line-height:1;
-}
-/* Hover outline like CoM (faint purple) */
-.com-tag-pick:not(:empty){
-  border: 1px solid transparent;
-  border-radius: 6px;
-  padding: 2px 8px;
-}
-.com-tag-pick:not(:empty):hover{
-  border-color: rgba(120, 80, 160, .45);
-  box-shadow: 0 0 0 2px rgba(120, 80, 160, .15);
-}
-
-/* When editing inline */
-.com-tag-pick.com-editing{
-  border-color: rgba(120, 80, 160, .65) !important;
-  box-shadow: 0 0 0 2px rgba(120, 80, 160, .22) !important;
-  background: rgba(120, 80, 160, .06);
-  outline: none;
-}
-
-
+        cursor:pointer;
+        opacity:.65;
+        font-size:11px;
+        line-height:1;
+      }
       .com-edit-tag:hover { opacity: 1; }
+
+      /* Hover outline like CoM (faint purple) */
+      .com-tag-pick:not(:empty){
+        border: 1px solid transparent;
+        border-radius: 6px;
+        padding: 2px 8px;
+      }
+      .com-tag-pick:not(:empty):hover{
+        border-color: rgba(120, 80, 160, .45);
+        box-shadow: 0 0 0 2px rgba(120, 80, 160, .15);
+      }
+
+      /* When editing inline */
+      .com-tag-pick.com-editing{
+        border-color: rgba(120, 80, 160, .65) !important;
+        box-shadow: 0 0 0 2px rgba(120, 80, 160, .22) !important;
+        background: rgba(120, 80, 160, .06);
+        outline: none;
+      }
+
+      /* hidden storage input */
+      .com-hidden-store{ display:none !important; }
 
       .com-artifact .hint { opacity: .8; font-size: 12px; margin-top: 8px; }
     `;
@@ -233,74 +239,110 @@ function ensureArtifactsTab(app, html, actor) {
     `);
   }
 
+  // Helper: set row visibility based on current text + lock state
   function syncTagRowUI($row, editable) {
     const $pick = $row.find(".com-tag-pick");
     const $edit = $row.find(".com-edit-tag");
-    const $input = $row.find("input.com-editor-only");
-
     const name = ($pick.text() ?? "").trim();
-    const editing = $row.data("editing") === 1;
+    const editing = $pick.hasClass("com-editing");
 
     if (!editable) {
-      // Locked: no inputs/edit buttons; show only non-empty pick
-      $input.hide();
       $edit.hide();
       $pick.toggle(!!name);
       return;
     }
 
-    // Editable:
-    if (editing) {
-      $pick.show(); // keep pick shown for click-to-highlight
-      $edit.hide();
-      $input.show();
-      return;
-    }
+    // Editable
+    $edit.show();
+    $pick.toggle(!!name || editing); // if empty and not editing -> hide label; show only ✎
+  }
 
-    if (name) {
-      // Named: show pick + edit, hide input
-      $pick.show();
-      $edit.show();
-      $input.hide();
-    } else {
-      // Empty: hide pick+edit, show input
-      $pick.hide();
-      $edit.hide();
-      $input.show();
+  function placeCaretAtEnd(el) {
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      range.collapse(false);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    } catch (_) {}
+  }
+
+  function startInlineEdit($row, editable) {
+    if (!editable) return;
+
+    const $pick = $row.find(".com-tag-pick");
+    const $store = $row.find("input.com-hidden-store");
+
+    // Ensure label is visible while editing
+    $pick.show();
+    $pick.addClass("com-editing");
+
+    // Start editing
+    const el = $pick[0];
+    el.contentEditable = "true";
+    el.focus();
+    // If currently empty, start from stored value (maybe empty)
+    if (!(($pick.text() ?? "").trim()) && ($store.val() ?? "")) {
+      $pick.text(($store.val() ?? "").trim());
     }
+    placeCaretAtEnd(el);
+  }
+
+  function cancelInlineEdit($row) {
+    const $pick = $row.find(".com-tag-pick");
+    const $store = $row.find("input.com-hidden-store");
+
+    // Revert to stored value
+    $pick.text(($store.val() ?? "").trim());
+
+    const el = $pick[0];
+    el.contentEditable = "false";
+    $pick.removeClass("com-editing");
+  }
+
+  function commitInlineEdit($row) {
+    const $pick = $row.find(".com-tag-pick");
+    const $store = $row.find("input.com-hidden-store");
+
+    const newVal = (($pick.text() ?? "").trim());
+
+    // Write to hidden input and trigger your existing change handler
+    $store.val(newVal);
+    $store.trigger("change");
+
+    const el = $pick[0];
+    el.contentEditable = "false";
+    $pick.removeClass("com-editing");
   }
 
   (async () => {
     const artifacts = await getArtifacts(actor);
     const grid = body.find(`.tab[data-tab="${MODULE_ID}"] .com-artifacts-grid`);
 
-    const renderTagRow = ({ idx, pickKey, isWeak, field, value, placeholder }) => {
-  const label = ((value ?? "").trim());
-  const hasValue = !!label;
+    const renderTagRow = ({ pickKey, isWeak, field, value }) => {
+      const label = ((value ?? "").trim());
+      const hasValue = !!label;
 
-  return `
-    <div class="tag-row" data-field="${field}">
-      <span
-        class="com-tag-pick ${isWeak ? "com-weak" : ""}"
-        data-pick="${pickKey}"
-        style="${hasValue ? "" : "display:none;"}"
-      >${Handlebars.escapeExpression(label)}</span>
+      return `
+        <div class="tag-row" data-field="${field}">
+          <span
+            class="com-tag-pick ${isWeak ? "com-weak" : ""}"
+            data-pick="${pickKey}"
+            style="${hasValue ? "" : "display:none;"}"
+          >${Handlebars.escapeExpression(label)}</span>
 
-      <button type="button"
-        class="com-edit-tag"
-        title="${hasValue ? "Edit" : "Add"}"
-      >✎</button>
+          <button type="button"
+            class="com-edit-tag"
+            title="${hasValue ? "Edit" : "Add"}"
+          >✎</button>
 
-      <!-- hidden storage input, never shown -->
-      <input class="com-editor-only com-hidden-store" type="text" data-field="${field}"
-        value="${Handlebars.escapeExpression(value ?? "")}"
-        placeholder="${Handlebars.escapeExpression(placeholder)}"
-        style="display:none;"
-      />
-    </div>
-  `;
-};
-
+          <input class="com-editor-only com-hidden-store" type="text" data-field="${field}"
+            value="${Handlebars.escapeExpression(value ?? "")}"
+          />
+        </div>
+      `;
+    };
 
     const renderSlot = (a, idx) => {
       const imgStyle = a.img ? `style="background-image:url('${a.img.replace(/'/g, "%27")}')"` : "";
@@ -323,26 +365,23 @@ function ensureArtifactsTab(app, html, actor) {
           <label>Power Tags (click to mark)</label>
 
           ${renderTagRow({
-            idx, pickKey: `a${idx}.p0`, isWeak: false,
+            pickKey: `a${idx}.p0`, isWeak: false,
             field: "power.0.name",
-            value: a.power?.[0]?.name ?? "",
-            placeholder: "Power tag 1"
+            value: a.power?.[0]?.name ?? ""
           })}
 
           ${renderTagRow({
-            idx, pickKey: `a${idx}.p1`, isWeak: false,
+            pickKey: `a${idx}.p1`, isWeak: false,
             field: "power.1.name",
-            value: a.power?.[1]?.name ?? "",
-            placeholder: "Power tag 2"
+            value: a.power?.[1]?.name ?? ""
           })}
 
           <label style="margin-top:8px; display:block;">Weakness Tag (click to mark)</label>
 
           ${renderTagRow({
-            idx, pickKey: `a${idx}.w`, isWeak: true,
+            pickKey: `a${idx}.w`, isWeak: true,
             field: "weakness.name",
-            value: a.weakness?.name ?? "",
-            placeholder: "Weakness tag"
+            value: a.weakness?.name ?? ""
           })}
         </div>
 
@@ -363,12 +402,15 @@ function ensureArtifactsTab(app, html, actor) {
 
     // Click-to-highlight (NO actor writes)
     grid.off("click.comArtifactsPick").on("click.comArtifactsPick", ".com-tag-pick", (ev) => {
+      // If currently editing, don't toggle highlight
+      if ($(ev.currentTarget).hasClass("com-editing")) return;
+
       const key = ev.currentTarget.dataset.pick;
       const set = toggleSel(actor.id, key);
       $(ev.currentTarget).toggleClass("com-picked", set.has(key));
     });
 
-    // Edit button: show input temporarily
+    // Edit button: inline edit the label itself
     grid.off("click.comArtifactsEdit").on("click.comArtifactsEdit", ".com-edit-tag", (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
@@ -377,22 +419,42 @@ function ensureArtifactsTab(app, html, actor) {
       if (!editable) return;
 
       const $row = $(ev.currentTarget).closest(".tag-row");
-      $row.data("editing", 1);
-
-      const $input = $row.find("input.com-editor-only");
-      $input.show().focus();
+      startInlineEdit($row, editable);
       syncTagRowUI($row, true);
     });
 
-    // When leaving input (blur), stop editing + apply hide/show rules
-    grid.off("blur.comArtifactsEdit", "input.com-editor-only").on("blur.comArtifactsEdit", "input.com-editor-only", (ev) => {
-      const editable = isSheetEditable(html);
+    // Key handling while editing
+    grid.off("keydown.comArtifactsInline").on("keydown.comArtifactsInline", ".com-tag-pick.com-editing", (ev) => {
       const $row = $(ev.currentTarget).closest(".tag-row");
-      $row.data("editing", 0);
+
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        ev.stopPropagation();
+        commitInlineEdit($row);
+        const editable = isSheetEditable(html);
+        syncTagRowUI($row, editable);
+        return;
+      }
+
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        ev.stopPropagation();
+        cancelInlineEdit($row);
+        const editable = isSheetEditable(html);
+        syncTagRowUI($row, editable);
+        return;
+      }
+    });
+
+    // Blur saves
+    grid.off("blur.comArtifactsInline").on("blur.comArtifactsInline", ".com-tag-pick.com-editing", (ev) => {
+      const $row = $(ev.currentTarget).closest(".tag-row");
+      commitInlineEdit($row);
+      const editable = isSheetEditable(html);
       syncTagRowUI($row, editable);
     });
 
-    // Save changes (name fields / tag text fields only)
+    // Save changes (artifact name + hidden tag storage)
     grid.off("change.comArtifacts").on("change.comArtifacts", "input", async (ev) => {
       const tab = getActiveTab(html) || MODULE_ID;
       app._comLastTab = tab;
@@ -410,7 +472,7 @@ function ensureArtifactsTab(app, html, actor) {
 
       ref[lastKey] = ev.currentTarget.value;
 
-      // Update visible clickable label immediately
+      // Update visible clickable label immediately (for tag edits)
       const $section = $(section);
       if (field === "power.0.name") $section.find(`.com-tag-pick[data-pick="a${idx}.p0"]`).text(ev.currentTarget.value.trim());
       if (field === "power.1.name") $section.find(`.com-tag-pick[data-pick="a${idx}.p1"]`).text(ev.currentTarget.value.trim());
@@ -419,11 +481,9 @@ function ensureArtifactsTab(app, html, actor) {
       await setArtifacts(actor, artifacts2);
       forceActivateTab(app, app._comLastTab);
 
-      // After saving, enforce the new "hide input if named" rule
+      // Re-apply row visibility rules
       const editable = isSheetEditable(html);
       $section.find(".tag-row").each((_, rowEl) => syncTagRowUI($(rowEl), editable));
-
-      // Re-apply lock behavior
       setArtifactsEditable(html, editable);
     });
 
@@ -461,13 +521,12 @@ function ensureArtifactsTab(app, html, actor) {
       forceActivateTab(app, app._comLastTab);
     });
 
-    // Apply lock state to Artifacts tab + sync per-row UI
+    // Apply lock state + sync per-row UI
     const editable = isSheetEditable(html);
     setArtifactsEditable(html, editable);
     installLockObserver(app, html);
 
     grid.find(".tag-row").each((_, rowEl) => syncTagRowUI($(rowEl), editable));
-
   })();
 }
 
@@ -607,4 +666,3 @@ Hooks.on("renderRollDialog", async (app, html) => {
     console.error("com-artifacts | renderRollDialog failed", e);
   }
 });
-
