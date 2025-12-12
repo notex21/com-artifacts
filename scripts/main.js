@@ -39,6 +39,17 @@ function computeArtifactMod(artifact) {
   if (w?.active && (w?.name ?? "").trim()) mod -= 1;
   return mod;
 }
+function rememberActiveTab(app, html) {
+  const active = html.find('nav.sheet-tabs a.item.active, nav.tabs a.item.active').data("tab");
+  app._comArtifactsLastTab = active || app._comArtifactsLastTab;
+}
+
+function restoreActiveTab(app) {
+  const tab = app._comArtifactsLastTab;
+  const tabs = app?._tabs?.[0];
+  if (tab && tabs) tabs.activate(tab);
+}
+
 
 /* -------------------- Sheet UI: Add "Artifacts" tab -------------------- */
 
@@ -166,8 +177,16 @@ function ensureArtifactsTab(app, html, actor) {
 Hooks.on("renderActorSheet", (app, html) => {
   const actor = app?.actor;
   if (!actor) return;
+
+  // Remember what tab was active before this render finishes
+  rememberActiveTab(app, html);
+
   ensureArtifactsTab(app, html, actor);
+
+  // Restore the last active tab after our tab exists
+  restoreActiveTab(app);
 });
+
 
 /* -------------------- RollDialog: Inject artifact modifier into Custom Modifier -------------------- */
 
