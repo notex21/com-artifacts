@@ -88,12 +88,6 @@ async function setArtifacts(actor, artifacts) {
   return actor.setFlag(MODULE_ID, "artifacts", artifacts);
 }
 
-function computeArtifactMod(artifact) {
-  if (!artifact) return 0;
-  // unused in this new flow; RollDialog builds +/- from selection
-  return 0;
-}
-
 /* -------------------- Tab preservation helpers -------------------- */
 
 function getActiveTab(html) {
@@ -551,7 +545,7 @@ Hooks.on("renderActorSheet", (app, html) => {
   installLockObserver(app, $html);
 });
 
-/* -------------------- RollDialog injection (robust, no ui.windows dependency) -------------------- */
+/* -------------------- RollDialog + GM Review injection -------------------- */
 
 function findCustomModifierInput($root) {
   // Prefer label match
@@ -559,7 +553,6 @@ function findCustomModifierInput($root) {
   for (const el of labels) {
     const txt = (el.textContent ?? "").trim().toLowerCase();
     if (txt === "custom modifier") {
-      // common CoM layout: label then input in same container
       const $wrap = $(el).closest("div");
       const $input = $wrap.find("input").first();
       if ($input.length) return $input;
@@ -571,26 +564,120 @@ function findCustomModifierInput($root) {
   return $cand.length ? $cand : null;
 }
 
-function buildSelectedEntries(artifacts, selSet) {
+function buildSelectedEntriesWithWeakness(artifacts, selSet) {
   const out = [];
   for (let a = 0; a < 2; a++) {
     const art = artifacts[a];
+    const weakName = (art.weakness?.name ?? "").trim();
 
-    if (selSet.has(`a${a}.p0`) && (art.power?.[0]?.name ?? "").trim())
-      out.push({ label: art.power[0].name, mod: +1 });
+    const p0 = (art.power?.[0]?.name ?? "").trim();
+    const p1 = (art.power?.[1]?.name ?? "").trim();
 
-    if (selSet.has(`a${a}.p1`) && (art.power?.[1]?.name ?? "").trim())
-      out.push({ label: art.power[1].name, mod: +1 });
+    const hasP0 = selSet.has(`a${a}.p0`) && p0;
+    const hasP1 = selSet.has(`a${a}.p1`) && p1;
 
-    if (selSet.has(`a${a}.w`) && (art.weakness?.name ?? "").trim())
-      out.push({ label: art.weakness.name, mod: -1 });
+    if (hasP0) {
+      out.push({ label: p0, mod: +1, kind: "power", artIndex: a });
+      if (weakName) out.push({ label: weakName, mod: -1, kind: "weakness", artIndex: a, defaultChecked: false });
+    }
+    if (hasP1) {
+      out.push({ label: p1, mod: +1, kind: "power", artIndex: a });
+      if (weakName) out.push({ label: weakName, mod: -1, kind: "weakness", artIndex: a, defaultChecked: false });
+    }
+
+    // Also: if user explicitly selected the weakness highlight, keep it listed too
+    if (selSet.has(`a${a}.w`) && weakName) {
+      out.push({ label: weakName, mod: -1, kind: "weakness", artIndex: a, defaultChecked: true });
+    }
   }
   return out;
 }
 
+function injectArtifactsApprovalPanel({ $root, actor, artifacts, selSet, canToggle, allowApplyToCustomModifier }) {
+  // Remove any old panel (prevents duplicates from CoM refresh cycles)
+  $root.find(".com-artifacts-roll").remove();
+
+  const entries = buildSelectedEntriesWithWeakness(artifacts, selSet);
+
+  const $modInput = allowApplyToCustomModifier ? findCustomModifierInput($root) : null;
+
+  // base modifier capture (per dialog instance) if we are applying
+  if (allowApplyToCustomModifier && $modInput?.length) {
+    // app is not passed here; we use data attribute fallback
+    if (!Number.isFinite(Number($root.data("comArtifactsBaseMod")))) {
+      const base = Number($modInput.val() ?? 0);
+      $root.data("comArtifactsBaseMod", Number.isFinite(base) ? base : 0);
+    }
+  }
+
+  const $mount = $root.find("form").first().length ? $root.find("form").first() : $root;
+
+  const $panel = $(`
+    <fieldset class="com-artifacts-roll" style="margin-top:10px; padding:8px; border:1px solid var(--color-border-light-primary); border-radius:6px;">
+      <legend>Artifacts</legend>
+
+      <div style="opacity:.85; font-size:12px; margin-bottom:6px;">
+        ${canToggle ? "GM approval: check/uncheck to approve or deny (and optionally invoke Weakness)." : "Waiting for GM approval."}
+      </div>
+
+      <div class="com-artifacts-approve" style="display:flex; flex-direction:column; gap:6px;">
+        ${
+          entries.length
+            ? entries.map(e => {
+                const isWeak = e.kind === "weakness";
+                const checked = e.kind === "power" ? true : !!e.defaultChecked; // powers default checked, weakness default unchecked
+                const disabledAttr = canToggle ? "" : "disabled";
+                const checkedAttr = checked ? "checked" : "";
+                const labelPrefix = isWeak ? "Weakness: " : "";
+                return `
+                  <label style="display:flex; align-items:center; gap:8px; ${canToggle ? "" : "opacity:.9;"}">
+                    <input type="checkbox" class="com-approve" data-mod="${e.mod}" ${checkedAttr} ${disabledAttr} />
+                    <span>${Handlebars.escapeExpression(labelPrefix + e.label)}</span>
+                    <span style="margin-left:auto; opacity:.8;">${e.mod > 0 ? "+1" : "-1"}</span>
+                  </label>
+                `;
+              }).join("")
+            : `<div style="opacity:.8;">No highlighted artifact tags.</div>`
+        }
+      </div>
+
+      <div class="form-group" style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
+        <span>Artifact modifier:</span>
+        <strong class="com-artifacts-mod">+0</strong>
+      </div>
+    </fieldset>
+  `);
+
+  $mount.append($panel);
+
+  function recomputeAndApply() {
+    let mod = 0;
+    $panel.find("input.com-approve:checked").each((_, el) => {
+      mod += Number(el.dataset.mod ?? 0);
+    });
+
+    $panel.find(".com-artifacts-mod").text(`${mod >= 0 ? "+" : ""}${mod}`);
+
+    if (allowApplyToCustomModifier && $modInput?.length) {
+      const base = Number($root.data("comArtifactsBaseMod") ?? 0);
+      $modInput.val(base + mod);
+      $modInput.trigger("input");
+      $modInput.trigger("change");
+    }
+  }
+
+  recomputeAndApply();
+
+  $panel.on("change", "input.com-approve", () => {
+    if (!canToggle) return;
+    recomputeAndApply();
+  });
+}
+
+/* -------------------- Player RollDialog injection -------------------- */
+
 Hooks.on("renderRollDialog", async (app, html) => {
   try {
-    // Some CoM refresh cycles can pass odd html; fall back to app.element.
     const $root =
       html?.jquery ? html :
       html ? $(html) :
@@ -607,93 +694,140 @@ Hooks.on("renderRollDialog", async (app, html) => {
 
     if (!actor) return;
 
-    // Avoid double-inject
-    if ($root.find(".com-artifacts-roll").length) return;
-
-    const $modInput = findCustomModifierInput($root);
-    if (!$modInput || !$modInput.length) return;
-
-    // Base modifier capture (per dialog instance)
-    if (!Number.isFinite(app._comArtifactsBaseMod)) {
-      const base = Number($modInput.val() ?? 0);
-      app._comArtifactsBaseMod = Number.isFinite(base) ? base : 0;
-    }
-
     const artifacts = await getArtifacts(actor);
+    const selSet = getSel(actor.id);
 
-    // IMPORTANT: selection must come from THIS USER (persisted), not GM.
-    const sel = getSel(actor.id);
-
-    const entries = buildSelectedEntries(artifacts, sel);
-
-    // Players must not be able to toggle approval checkboxes.
-    // GM can approve/deny here.
+    // Player cannot toggle; GM can toggle (if GM is the one rolling locally)
     const canToggle = !!game.user?.isGM;
 
-    // Where to insert: prefer form if it exists, else insert into dialog content.
-    const $form = $root.find("form").first();
-    const $mount = $form.length ? $form : $root;
-
-    const $panel = $(`
-      <fieldset class="com-artifacts-roll" style="margin-top:10px; padding:8px; border:1px solid var(--color-border-light-primary); border-radius:6px;">
-        <legend>Artifacts</legend>
-
-        <div style="opacity:.85; font-size:12px; margin-bottom:6px;">
-          ${canToggle ? "GM approval: check/uncheck to approve or deny." : "Waiting for GM approval."}
-        </div>
-
-        <div class="com-artifacts-approve" style="display:flex; flex-direction:column; gap:6px;">
-          ${
-            entries.length
-              ? entries.map(e => `
-                <label style="display:flex; align-items:center; gap:8px; ${canToggle ? "" : "opacity:.9;"}">
-                  <input type="checkbox" class="com-approve" data-mod="${e.mod}" ${canToggle ? "" : "disabled"} checked />
-                  <span>${Handlebars.escapeExpression(e.label)}</span>
-                  <span style="margin-left:auto; opacity:.8;">${e.mod > 0 ? "+1" : "-1"}</span>
-                </label>
-              `).join("")
-              : `<div style="opacity:.8;">No highlighted artifact tags.</div>`
-          }
-        </div>
-
-        <div class="form-group" style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
-          <span>Artifact modifier:</span>
-          <strong class="com-artifacts-mod">+0</strong>
-        </div>
-      </fieldset>
-    `);
-
-    $mount.append($panel);
-
-    function recomputeAndApply() {
-      let mod = 0;
-
-      // If player: treat as "all selected are proposed" (checkboxes disabled but checked)
-      // If GM: uses their checked state
-      $panel.find("input.com-approve:checked").each((_, el) => {
-        mod += Number(el.dataset.mod ?? 0);
-      });
-
-      $panel.find(".com-artifacts-mod").text(`${mod >= 0 ? "+" : ""}${mod}`);
-
-      // Apply to Custom Modifier
-      $modInput.val((app._comArtifactsBaseMod ?? 0) + mod);
-      $modInput.trigger("input");
-      $modInput.trigger("change");
-    }
-
-    recomputeAndApply();
-
-    // Only GM can change it, but binding is harmless for players
-    $panel.on("change", "input.com-approve", () => {
-      if (!canToggle) return;
-      recomputeAndApply();
+    // In RollDialog we DO apply to Custom Modifier
+    injectArtifactsApprovalPanel({
+      $root,
+      actor,
+      artifacts,
+      selSet,
+      canToggle,
+      allowApplyToCustomModifier: true
     });
-
-    // Do NOT clear selection on submit; it can race with CoM refresh/re-render flows.
-    // If you want clearing later, do it after roll resolution, not here.
 
   } catch (e) {
     console.error("com-artifacts | renderRollDialog failed", e);
+  }
+});
+
+/* -------------------- GM Review dialog injection (THIS IS THE FIX YOU ASKED FOR) --------------------
+   CoM uses a TagReviewDialog for the MC. We inject there too so the GM sees the same panel.
+   We do NOT apply to Custom Modifier there (the roll is already done), this is just approval + optional weakness invoke.
+*/
+
+function resolveActorForReviewDialog(app, $root) {
+  // Best guesses in order:
+  const direct =
+    app?.actor ??
+    app?.options?.actor ??
+    (app?.options?.actorId ? game.actors.get(app.options.actorId) : null) ??
+    (app?.options?.data?.actorId ? game.actors.get(app.options.data.actorId) : null);
+
+  if (direct) return direct;
+
+  // Heuristic: try find actor name inside the dialog text and match by name
+  try {
+    const txt = ($root.text() ?? "").trim();
+    if (!txt) return null;
+
+    // cheap match: find any actor name that appears in dialog
+    for (const a of game.actors) {
+      if (!a?.name) continue;
+      if (txt.includes(a.name)) return a;
+    }
+  } catch (_) {}
+
+  return null;
+}
+
+// If the system provides a direct hook, use it.
+Hooks.on("renderTagReviewDialog", async (app, html) => {
+  try {
+    if (!game.user?.isGM) return;
+
+    const $root = html?.jquery ? html : $(html);
+    if (!$root?.length) return;
+
+    const actor = resolveActorForReviewDialog(app, $root);
+    if (!actor) return;
+
+    const artifacts = await getArtifacts(actor);
+
+    // IMPORTANT: GM reviewing needs the CURRENT user's persisted selection for THIS actor.
+    // In practice, this means: GM sees their own selection if they clicked; but usually GM is reviewing a player.
+    // We cannot reliably know "which player" from the dialog in a system-agnostic way,
+    // so we show the union of all non-GM users who have a selection for this actor.
+    const union = new Set();
+
+    for (const u of game.users) {
+      if (!u || u.isGM) continue;
+      const all = u.getFlag(MODULE_ID, "selection") ?? {};
+      const arr = Array.isArray(all?.[actor.id]) ? all[actor.id] : [];
+      for (const k of arr) if (k) union.add(k);
+    }
+
+    // Fallback: if nobody has anything, still allow GM’s own selection (rare)
+    if (!union.size) {
+      const gmSel = getSel(actor.id);
+      for (const k of gmSel) union.add(k);
+    }
+
+    injectArtifactsApprovalPanel({
+      $root,
+      actor,
+      artifacts,
+      selSet: union,
+      canToggle: true,                  // GM can approve/deny here
+      allowApplyToCustomModifier: false // review dialog: do not touch roll modifier
+    });
+
+  } catch (e) {
+    console.error("com-artifacts | renderTagReviewDialog failed", e);
+  }
+});
+
+// Safety net: some CoM builds may not emit renderTagReviewDialog; catch by constructor name.
+Hooks.on("renderApplication", async (app, html) => {
+  try {
+    if (!game.user?.isGM) return;
+    const name = app?.constructor?.name ?? "";
+    if (name !== "TagReviewDialog") return;
+
+    const $root = html?.jquery ? html : $(html);
+    if (!$root?.length) return;
+
+    const actor = resolveActorForReviewDialog(app, $root);
+    if (!actor) return;
+
+    const artifacts = await getArtifacts(actor);
+
+    const union = new Set();
+    for (const u of game.users) {
+      if (!u || u.isGM) continue;
+      const all = u.getFlag(MODULE_ID, "selection") ?? {};
+      const arr = Array.isArray(all?.[actor.id]) ? all[actor.id] : [];
+      for (const k of arr) if (k) union.add(k);
+    }
+    if (!union.size) {
+      const gmSel = getSel(actor.id);
+      for (const k of gmSel) union.add(k);
+    }
+
+    injectArtifactsApprovalPanel({
+      $root,
+      actor,
+      artifacts,
+      selSet: union,
+      canToggle: true,
+      allowApplyToCustomModifier: false
+    });
+
+  } catch (e) {
+    console.error("com-artifacts | renderApplication(TagReviewDialog) failed", e);
   }
 });
