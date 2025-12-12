@@ -207,35 +207,38 @@ Hooks.on("renderActorSheet", (app, html) => {
   forceActivateTab(app, app._comLastTab);
 });
 
-/* -------------------- RollDialog: Inject artifact modifier into Custom Modifier -------------------- */
+/* -------------------- RollDialog: Apply artifacts like Theme Tags -------------------- */
 
 function findCustomModifierInput(html) {
-  // Find label "Custom Modifier" then the input in the same form-group block
+  if (!html?.find) return null;
+
+  // City of Mist uses "Custom Modifier" label (English), but we also support partial matches.
   const labels = html.find("label");
   for (const el of labels) {
     const txt = (el.textContent ?? "").trim().toLowerCase();
-    if (txt === "custom modifier") {
+    if (txt === "custom modifier" || txt.includes("modifier")) {
       const input = $(el).closest(".form-group, .form-fields, div").find("input").first();
       if (input?.length) return input;
     }
   }
 
-  // Fallback: any input with placeholder/aria containing modifier
-  const inputs = html.find("input");
-  for (const el of inputs) {
-    const $el = $(el);
-    const ph = ($el.attr("placeholder") ?? "").toLowerCase();
-    const aria = ($el.attr("aria-label") ?? "").toLowerCase();
-    if (ph.includes("modifier") || aria.includes("modifier")) return $el;
-  }
-
-  // Last resort
+  // Fallback: first text/number input in the dialog body
   const any = html.find('input[type="number"], input[type="text"]').first();
   return any?.length ? any : null;
 }
 
+function autoSelectArtifactIndex(artifacts) {
+  // If exactly one artifact has a non-zero mod, auto-select it (feels like theme tags behavior).
+  const mods = artifacts.map(a => computeArtifactMod(a));
+  const nonZero = mods.map((m, i) => ({ m, i })).filter(x => x.m !== 0);
+  if (nonZero.length === 1) return nonZero[0].i;
+  return -1; // None
+}
+
 Hooks.on("renderRollDialog", async (app, html) => {
   try {
+    if (!html?.find) return;
+
     // Resolve actor
     const actor =
       app.actor ??
@@ -248,6 +251,25 @@ Hooks.on("renderRollDialog", async (app, html) => {
     const artifacts = await getArtifacts(actor);
     if (!artifacts) return;
 
+    const form = html.find("form");
+    if (!form.length) return;
+
+    // Prevent duplicate injection on dialog refresh
+    if (form.find(".com-artifacts-roll").length) return;
+
+    const modInput = findCustomModifierInput(html);
+    if (!modInput || !modInput.length) return;
+
+    // Capture the base Custom Modifier ONCE so we don't stack on re-renders
+    // (stored on the app instance)
+    if (!Number.isFinite(app._comArtifactsBaseMod)) {
+      const base = Number(modInput.val() ?? 0);
+      app._comArtifactsBaseMod = Number.isFinite(base) ? base : 0;
+    }
+
+    // Build UI panel (like theme tags: choose source, it applies immediately)
+    const initialSelect = autoSelectArtifactIndex(artifacts);
+
     const panel = $(`
       <fieldset class="com-artifacts-roll" style="margin-top:10px; padding:8px; border:1px solid var(--color-border-light-primary); border-radius:6px;">
         <legend>Artifacts</legend>
@@ -255,9 +277,9 @@ Hooks.on("renderRollDialog", async (app, html) => {
         <div class="form-group" style="display:flex; gap:8px; align-items:center;">
           <label style="flex:0 0 auto;">Use:</label>
           <select name="comArtifactSlot" style="flex:1;">
+            <option value="-1">None</option>
             <option value="0">${Handlebars.escapeExpression(artifacts[0]?.name ?? "Artifact 1")}</option>
             <option value="1">${Handlebars.escapeExpression(artifacts[1]?.name ?? "Artifact 2")}</option>
-            <option value="-1">None</option>
           </select>
         </div>
 
@@ -267,56 +289,42 @@ Hooks.on("renderRollDialog", async (app, html) => {
         </div>
 
         <p class="notes" style="margin:0;">
-          Uses the active toggles from your Artifact sheet.
+          Uses the active toggles from your Artifact sheet and writes into Custom Modifier automatically.
         </p>
       </fieldset>
     `);
 
-    const form = html.find("form");
-    if (form.length) form.append(panel);
-    else html.append(panel);
+    form.append(panel);
 
-    const modInput = findCustomModifierInput(html);
+    const select = panel.find('select[name="comArtifactSlot"]');
+    select.val(String(initialSelect));
 
-    function getSelectedSlotAndMod() {
-      const slot = Number(panel.find('select[name="comArtifactSlot"]').val());
-      let mod = 0;
-      if (slot === 0 || slot === 1) mod = computeArtifactMod(artifacts[slot]);
-      const sign = mod >= 0 ? "+" : "";
-      panel.find(".com-artifacts-mod").text(`${sign}${mod}`);
-      return { slot, mod };
-    }
+    function applyArtifactToDialog() {
+      const slot = Number(select.val());
+      const mod = (slot === 0 || slot === 1) ? computeArtifactMod(artifacts[slot]) : 0;
 
-    getSelectedSlotAndMod();
+      panel.find(".com-artifacts-mod").text(`${mod >= 0 ? "+" : ""}${mod}`);
 
-    panel.on("change", 'select[name="comArtifactSlot"]', () => {
-      getSelectedSlotAndMod();
-    });
-
-    // Hook Confirm specifically (CoM dialog uses Confirm)
-    const confirmBtn = html.find('button:contains("Confirm")');
-    if (!confirmBtn.length) return;
-
-    // Avoid double-binding if the dialog re-renders
-    confirmBtn.off("click.comArtifacts").on("click.comArtifacts", async () => {
-      const { slot, mod } = getSelectedSlotAndMod();
-      if (!mod) return;
-
-      if (!modInput || !modInput.length) {
-        ui.notifications?.warn("Artifacts: Could not find the Custom Modifier input.");
-        return;
-      }
-
-      const current = Number(modInput.val() ?? 0);
-      const next = (Number.isFinite(current) ? current : 0) + mod;
-
+      // Set Custom Modifier = base + artifactMod (no stacking)
+      const next = (app._comArtifactsBaseMod ?? 0) + mod;
       modInput.val(next);
       modInput.trigger("input");
       modInput.trigger("change");
 
-      panel.find(".com-artifacts-mod").text(`${mod >= 0 ? "+" : ""}${mod} (applied)`);
+      return { slot, mod };
+    }
 
-      // NEW: auto-uncheck used artifact toggles after the roll
+    // Apply immediately when dialog opens
+    applyArtifactToDialog();
+
+    // Update live when selection changes (theme-tag-like)
+    select.on("change", () => applyArtifactToDialog());
+
+    // Auto-uncheck used artifact toggles AFTER submitting the roll
+    // We hook submit, not the Confirm button label, so localization won’t break.
+    form.off("submit.comArtifacts").on("submit.comArtifacts", async () => {
+      const { slot } = applyArtifactToDialog();
+
       if (slot === 0 || slot === 1) {
         const artifacts2 = await getArtifacts(actor);
         for (const p of artifacts2[slot].power ?? []) p.active = false;
@@ -329,4 +337,3 @@ Hooks.on("renderRollDialog", async (app, html) => {
     console.error("com-artifacts | renderRollDialog failed", e);
   }
 });
-
