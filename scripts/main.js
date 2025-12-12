@@ -135,4 +135,151 @@ function ensureArtifactsTab(app, html, actor) {
       await setArtifacts(actor, artifacts2);
     });
 
-    // Imag
+    // Image pick/clear
+    grid.off("click.comArtifacts").on("click.comArtifacts", ".com-pick-img", async (ev) => {
+      const section = ev.currentTarget.closest(".com-artifact");
+      const idx = Number(section.dataset.idx);
+      const artifacts2 = await getArtifacts(actor);
+
+      new FilePicker({
+        type: "image",
+        current: artifacts2[idx].img || "",
+        callback: async (path) => {
+          artifacts2[idx].img = path;
+          await setArtifacts(actor, artifacts2);
+          app.render(false);
+        }
+      }).browse();
+    });
+
+    grid.on("click.comArtifacts", ".com-clear-img", async (ev) => {
+      const section = ev.currentTarget.closest(".com-artifact");
+      const idx = Number(section.dataset.idx);
+      const artifacts2 = await getArtifacts(actor);
+      artifacts2[idx].img = "";
+      await setArtifacts(actor, artifacts2);
+      app.render(false);
+    });
+  })();
+}
+
+Hooks.on("renderActorSheet", (app, html) => {
+  const actor = app?.actor;
+  if (!actor) return;
+  ensureArtifactsTab(app, html, actor);
+});
+
+/* -------------------- RollDialog: Inject artifact modifier into Custom Modifier -------------------- */
+
+function findCustomModifierInput(html) {
+  // Find label "Custom Modifier" then the input in the same form-group block
+  const labels = html.find("label");
+  for (const el of labels) {
+    const txt = (el.textContent ?? "").trim().toLowerCase();
+    if (txt === "custom modifier") {
+      const input = $(el).closest(".form-group, .form-fields, div").find("input").first();
+      if (input?.length) return input;
+    }
+  }
+
+  // Fallback: any input with placeholder/aria containing modifier
+  const inputs = html.find("input");
+  for (const el of inputs) {
+    const $el = $(el);
+    const ph = ($el.attr("placeholder") ?? "").toLowerCase();
+    const aria = ($el.attr("aria-label") ?? "").toLowerCase();
+    if (ph.includes("modifier") || aria.includes("modifier")) return $el;
+  }
+
+  // Last resort
+  const any = html.find('input[type="number"], input[type="text"]').first();
+  return any?.length ? any : null;
+}
+
+Hooks.on("renderRollDialog", async (app, html) => {
+  try {
+    // Resolve actor
+    const actor =
+      app.actor ??
+      app.options?.actor ??
+      (app.options?.actorId ? game.actors.get(app.options.actorId) : null) ??
+      game.user.character;
+
+    if (!actor) return;
+
+    const artifacts = await getArtifacts(actor);
+    if (!artifacts) return;
+
+    const panel = $(`
+      <fieldset class="com-artifacts-roll" style="margin-top:10px; padding:8px; border:1px solid var(--color-border-light-primary); border-radius:6px;">
+        <legend>Artifacts</legend>
+
+        <div class="form-group" style="display:flex; gap:8px; align-items:center;">
+          <label style="flex:0 0 auto;">Use:</label>
+          <select name="comArtifactSlot" style="flex:1;">
+            <option value="0">${Handlebars.escapeExpression(artifacts[0]?.name ?? "Artifact 1")}</option>
+            <option value="1">${Handlebars.escapeExpression(artifacts[1]?.name ?? "Artifact 2")}</option>
+            <option value="-1">None</option>
+          </select>
+        </div>
+
+        <div class="form-group" style="display:flex; justify-content:space-between; align-items:center;">
+          <span>Computed modifier:</span>
+          <strong class="com-artifacts-mod">+0</strong>
+        </div>
+
+        <p class="notes" style="margin:0;">
+          Uses the active toggles from your Artifact sheet.
+        </p>
+      </fieldset>
+    `);
+
+    const form = html.find("form");
+    if (form.length) form.append(panel);
+    else html.append(panel);
+
+    const modInput = findCustomModifierInput(html);
+
+    function getSelectedMod() {
+      const slot = Number(panel.find('select[name="comArtifactSlot"]').val());
+      let mod = 0;
+      if (slot === 0 || slot === 1) mod = computeArtifactMod(artifacts[slot]);
+      const sign = mod >= 0 ? "+" : "";
+      panel.find(".com-artifacts-mod").text(`${sign}${mod}`);
+      return mod;
+    }
+
+    getSelectedMod();
+
+    panel.on("change", 'select[name="comArtifactSlot"]', () => {
+      getSelectedMod();
+    });
+
+    // Hook Confirm specifically (CoM dialog uses Confirm)
+    const confirmBtn = html.find('button:contains("Confirm")');
+    if (!confirmBtn.length) return;
+
+    // Avoid double-binding if the dialog re-renders
+    confirmBtn.off("click.comArtifacts").on("click.comArtifacts", () => {
+      const mod = getSelectedMod();
+      if (!mod) return;
+
+      if (!modInput || !modInput.length) {
+        ui.notifications?.warn("Artifacts: Could not find the Custom Modifier input.");
+        return;
+      }
+
+      const current = Number(modInput.val() ?? 0);
+      const next = (Number.isFinite(current) ? current : 0) + mod;
+
+      modInput.val(next);
+      modInput.trigger("input");
+      modInput.trigger("change");
+
+      panel.find(".com-artifacts-mod").text(`${mod >= 0 ? "+" : ""}${mod} (applied)`);
+    });
+
+  } catch (e) {
+    console.error("com-artifacts | renderRollDialog failed", e);
+  }
+});
