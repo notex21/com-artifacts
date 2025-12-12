@@ -279,24 +279,41 @@ Hooks.on("renderRollDialog", async (app, html) => {
     if (!confirmBtn.length) return;
 
     // Avoid double-binding if the dialog re-renders
-    confirmBtn.off("click.comArtifacts").on("click.comArtifacts", () => {
-      const mod = getSelectedMod();
-      if (!mod) return;
+    confirmBtn.off("click.comArtifacts").on("click.comArtifacts", async () => {
+  const slot = Number(panel.find('select[name="comArtifactSlot"]').val());
+  const mod = getSelectedMod();
 
-      if (!modInput || !modInput.length) {
-        ui.notifications?.warn("Artifacts: Could not find the Custom Modifier input.");
-        return;
-      }
+  if (mod && modInput && modInput.length) {
+    const current = Number(modInput.val() ?? 0);
+    const next = (Number.isFinite(current) ? current : 0) + mod;
 
-      const current = Number(modInput.val() ?? 0);
-      const next = (Number.isFinite(current) ? current : 0) + mod;
+    modInput.val(next);
+    modInput.trigger("input");
+    modInput.trigger("change");
 
-      modInput.val(next);
-      modInput.trigger("input");
-      modInput.trigger("change");
+    panel.find(".com-artifacts-mod").text(`${mod >= 0 ? "+" : ""}${mod} (applied)`);
+  }
 
-      panel.find(".com-artifacts-mod").text(`${mod >= 0 ? "+" : ""}${mod} (applied)`);
-    });
+  // Auto-clear toggles after roll confirm (only the selected artifact)
+  if (slot === 0 || slot === 1) {
+    try {
+      const artifactsNow = await getArtifacts(actor);
+
+      // Clear active toggles
+      for (const p of artifactsNow[slot].power ?? []) p.active = false;
+      if (artifactsNow[slot].weakness) artifactsNow[slot].weakness.active = false;
+
+      await setArtifacts(actor, artifactsNow);
+
+      // Keep the sheet on the Artifacts tab if it re-renders
+      // (this prevents “jump back” after the update)
+      actor.sheet?._comArtifactsLastTab = MODULE_ID;
+    } catch (e) {
+      console.error("com-artifacts | auto-clear after roll failed", e);
+    }
+  }
+});
+
 
   } catch (e) {
     console.error("com-artifacts | renderRollDialog failed", e);
