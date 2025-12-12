@@ -847,4 +847,7 @@ Hooks.on("renderTagReviewDialog", async (app, html) => {
   console.table(out);
   return out;
 })()
+Hooks.on("renderTagReviewDialog", (app, html) => {
+  console.log("com-artifacts | renderTagReviewDialog fired", app?.constructor?.name, app);
+});
 
