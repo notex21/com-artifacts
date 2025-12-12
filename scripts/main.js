@@ -5,6 +5,7 @@ const MODULE_ID = "com-artifacts";
 globalThis.comArtifactsSelection ??= new Map(); // Map<actorId, Set<string>>
 
 function getSel(actorId) {
+  if (!actorId) return new Set();
   if (!globalThis.comArtifactsSelection.has(actorId)) {
     globalThis.comArtifactsSelection.set(actorId, new Set());
   }
@@ -19,6 +20,7 @@ function toggleSel(actorId, key) {
 }
 
 function clearSel(actorId) {
+  if (!actorId) return;
   globalThis.comArtifactsSelection.delete(actorId);
 }
 
@@ -108,6 +110,7 @@ function setArtifactsEditable(html, editable) {
     });
   }
 
+  // Tag picking stays active even when locked
   tab.find(".com-tag-pick").css("pointer-events", "auto");
   tab.css("opacity", editable ? "" : "0.85");
 }
@@ -134,7 +137,11 @@ function installLockObserver(app, html) {
 /* -------------------- Sheet UI: Add "Artifacts" tab -------------------- */
 
 function ensureArtifactsTab(app, html, actor) {
-  if (!actor?.testUserPermission(game.user, "OWNER")) return;
+  if (!actor) return;
+
+  // IMPORTANT: allow anyone who can at least OBSERVE the actor to see/select tags.
+  // Editing still depends on sheet lock (and will effectively require OWNER).
+  if (!actor.testUserPermission(game.user, "OBSERVER")) return;
 
   // Inject minimal CSS once
   if (!document.getElementById("com-artifacts-inline-style")) {
@@ -197,7 +204,6 @@ function ensureArtifactsTab(app, html, actor) {
       }
 
       .com-hidden-store{ display:none !important; }
-
       .com-artifact .hint { opacity: .8; font-size: 12px; margin-top: 8px; }
     `;
     document.head.appendChild(style);
@@ -232,6 +238,7 @@ function ensureArtifactsTab(app, html, actor) {
       $pick.toggle(!!name);
       return;
     }
+
     $edit.show();
     $pick.toggle(!!name || editing);
   }
@@ -249,14 +256,17 @@ function ensureArtifactsTab(app, html, actor) {
 
   function startInlineEdit($row, editable) {
     if (!editable) return;
+
     const $pick = $row.find(".com-tag-pick");
     const $store = $row.find("input.com-hidden-store");
+
     $pick.show();
     $pick.addClass("com-editing");
 
     const el = $pick[0];
     el.contentEditable = "true";
     el.focus();
+
     if (!(($pick.text() ?? "").trim()) && ($store.val() ?? "")) {
       $pick.text(($store.val() ?? "").trim());
     }
@@ -266,7 +276,9 @@ function ensureArtifactsTab(app, html, actor) {
   function cancelInlineEdit($row) {
     const $pick = $row.find(".com-tag-pick");
     const $store = $row.find("input.com-hidden-store");
+
     $pick.text(($store.val() ?? "").trim());
+
     const el = $pick[0];
     el.contentEditable = "false";
     $pick.removeClass("com-editing");
@@ -275,6 +287,7 @@ function ensureArtifactsTab(app, html, actor) {
   function commitInlineEdit($row) {
     const $pick = $row.find(".com-tag-pick");
     const $store = $row.find("input.com-hidden-store");
+
     const newVal = (($pick.text() ?? "").trim());
     $store.val(newVal);
     $store.trigger("change");
@@ -376,12 +389,14 @@ function ensureArtifactsTab(app, html, actor) {
       $(ev.currentTarget).toggleClass("com-picked", set.has(key));
     });
 
-    // Edit button: inline edit the label itself
+    // Edit button
     grid.off("click.comArtifactsEdit").on("click.comArtifactsEdit", ".com-edit-tag", (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
+
       const editable = isSheetEditable(html);
       if (!editable) return;
+
       const $row = $(ev.currentTarget).closest(".tag-row");
       startInlineEdit($row, editable);
       syncTagRowUI($row, true);
@@ -490,6 +505,8 @@ function ensureArtifactsTab(app, html, actor) {
   })();
 }
 
+/* -------------------- Hook sheet renders (CoM sometimes uses CityCharacterSheet) -------------------- */
+
 Hooks.on("renderActorSheet", (app, html) => {
   const actor = app?.actor;
   if (!actor) return;
@@ -498,7 +515,6 @@ Hooks.on("renderActorSheet", (app, html) => {
   if (tab) app._comLastTab = tab;
 
   ensureArtifactsTab(app, html, actor);
-
   forceActivateTab(app, app._comLastTab);
 
   const editable = isSheetEditable(html);
@@ -506,135 +522,41 @@ Hooks.on("renderActorSheet", (app, html) => {
   installLockObserver(app, html);
 });
 
-/* =====================================================================================
-   ROLL + GM APPROVAL BRIDGE (fixes: player-only, first-login weirdness, GM cannot approve)
-   ===================================================================================== */
+// Extra safety hook for CoM-specific sheet class names
+Hooks.on("renderCityCharacterSheet", (app, html) => {
+  const actor = app?.actor;
+  if (!actor) return;
 
-globalThis.comArtifactsPendingByReq ??= new Map(); // reqId -> { actorId, userId, entries, ts }
+  const tab = getActiveTab(html);
+  if (tab) app._comLastTab = tab;
 
-/** Socket channel */
-function comSocket() {
-  return game.socket?.emit ? game.socket : null;
-}
+  ensureArtifactsTab(app, html, actor);
+  forceActivateTab(app, app._comLastTab);
 
-function emitCom(msg) {
-  const s = comSocket();
-  if (!s) return;
-  s.emit(`module.${MODULE_ID}`, msg);
-}
-
-Hooks.once("ready", () => {
-  const s = comSocket();
-  if (!s) return;
-
-  s.on(`module.${MODULE_ID}`, async (msg) => {
-    try {
-      if (!msg || msg.module !== MODULE_ID) return;
-
-      // Player -> GM: pending artifact entries for a roll request
-      if (msg.type === "artifactRollRequest") {
-        // GM only stores these (but harmless if others receive)
-        globalThis.comArtifactsPendingByReq.set(msg.reqId, {
-          actorId: msg.actorId,
-          userId: msg.userId,
-          entries: Array.isArray(msg.entries) ? msg.entries : [],
-          ts: Date.now()
-        });
-      }
-
-      // GM -> Player: decision
-      if (msg.type === "artifactRollDecision") {
-        if (msg.userId !== game.user.id) return;
-
-        // Find currently open RollDialog DOM and apply to Custom Modifier input
-        const reqId = msg.reqId;
-        const roll = findOpenRollDialogElement();
-        if (!roll) return;
-
-        const $root = roll.jquery ? roll : $(roll);
-        const $form = $root.find("form.roll-dialog, form").first();
-        if (!$form.length) return;
-
-        // Only apply if this RollDialog belongs to same request id (we store it on form dataset)
-        const formReq = $form.attr("data-com-reqid");
-        if (formReq && formReq !== reqId) return;
-
-        const $modInput = findCustomModifierInput($root);
-        if (!$modInput?.length) return;
-
-        const base = Number($modInput.attr("data-com-base") ?? 0);
-        const accepted = Array.isArray(msg.accepted) ? msg.accepted : [];
-        const mod = accepted.reduce((a, e) => a + Number(e.mod ?? 0), 0);
-
-        $modInput.val(base + mod);
-        $modInput.trigger("input");
-        $modInput.trigger("change");
-
-        // Update panel display if present
-        $form.find(".com-artifacts-roll .com-artifacts-mod").text(`${mod >= 0 ? "+" : ""}${mod}`);
-        $form.find(".com-artifacts-roll .com-artifacts-status").text("Approved");
-
-        // Clear selection after decision
-        clearSel(msg.actorId);
-      }
-    } catch (e) {
-      console.error("com-artifacts | socket handler failed", e);
-    }
-  });
+  const editable = isSheetEditable(html);
+  setArtifactsEditable(html, editable);
+  installLockObserver(app, html);
 });
 
-/* -------------------- RollDialog helpers -------------------- */
-
-function findOpenRollDialogElement() {
-  // ui.windows often doesn’t hold it reliably, so search DOM
-  const el = document.querySelector(".roll-dialog");
-  return el;
-}
+/* -------------------- RollDialog: inject artifact modifier panel (NO duplicates) -------------------- */
 
 function findCustomModifierInput($root) {
-  // $root is a jQuery-wrapped dialog root
   const labels = $root.find("label").toArray();
-  for (const l of labels) {
-    const txt = (l.textContent || "").trim().toLowerCase();
+  for (const el of labels) {
+    const txt = (el.textContent ?? "").trim().toLowerCase();
     if (txt === "custom modifier") {
-      // City of Mist uses a simple input right after label
-      const $row = $(l).closest("div");
-      const $inp = $row.find("input").first();
-      if ($inp.length) return $inp;
+      // CoM RollDialog usually has input in same parent block
+      const input = $(el).closest("div").find("input").first();
+      if (input?.length) return input;
     }
   }
 
-  // fallback: first text/number input
-  const $any = $root.find('input[type="number"], input[type="text"]').first();
-  return $any.length ? $any : null;
+  const any = $root.find('input[type="number"], input[type="text"]').first();
+  return any?.length ? any : null;
 }
-
-function buildSelectedEntries(artifacts, sel) {
-  const out = [];
-  for (let a = 0; a < 2; a++) {
-    const art = artifacts[a];
-
-    if (sel.has(`a${a}.p0`) && (art.power?.[0]?.name ?? "").trim())
-      out.push({ label: art.power[0].name, mod: +1 });
-
-    if (sel.has(`a${a}.p1`) && (art.power?.[1]?.name ?? "").trim())
-      out.push({ label: art.power[1].name, mod: +1 });
-
-    if (sel.has(`a${a}.w`) && (art.weakness?.name ?? "").trim())
-      out.push({ label: art.weakness.name, mod: -1 });
-  }
-  return out;
-}
-
-function makeReqId() {
-  return `${randomID?.() ?? Math.random().toString(36).slice(2)}-${Date.now()}`;
-}
-
-/* -------------------- Player RollDialog injection (no duplicate + defers apply until approval) -------------------- */
 
 Hooks.on("renderRollDialog", async (app, html) => {
   try {
-    // Only for the user who is rolling (players + GM when they roll)
     const actor =
       app.actor ??
       app.options?.actor ??
@@ -643,30 +565,44 @@ Hooks.on("renderRollDialog", async (app, html) => {
 
     if (!actor) return;
 
-    const $root = html.jquery ? html : $(html);
+    const $root = html?.jquery ? html : $(html);
 
-    const $form = $root.find("form.roll-dialog, form").first();
+    const $form = $root.find("form").first();
     if (!$form.length) return;
 
-    // ALWAYS remove any existing panel first (fixes the duplicate visual bug)
+    // HARD FIX: remove any previous panel before adding (prevents duplicates)
     $form.find(".com-artifacts-roll").remove();
-
-    const $modInput = findCustomModifierInput($root);
-    if (!$modInput?.length) return;
-
-    // Store base modifier once per dialog instance (in DOM, survives re-renders better)
-    if ($modInput.attr("data-com-base") == null) {
-      const base = Number($modInput.val() ?? 0);
-      $modInput.attr("data-com-base", Number.isFinite(base) ? String(base) : "0");
-    }
-
-    // attach request id to this form (used to match GM decision)
-    const reqId = $form.attr("data-com-reqid") || makeReqId();
-    $form.attr("data-com-reqid", reqId);
 
     const artifacts = await getArtifacts(actor);
     const sel = getSel(actor.id);
-    const entries = buildSelectedEntries(artifacts, sel);
+
+    const $modInput = findCustomModifierInput($root);
+    if (!$modInput || !$modInput.length) return;
+
+    // Store base modifier on the input itself (survives re-render better than app fields)
+    if ($modInput.data("comArtifactsBaseMod") == null) {
+      const base = Number($modInput.val() ?? 0);
+      $modInput.data("comArtifactsBaseMod", Number.isFinite(base) ? base : 0);
+    }
+
+    function selectedEntries() {
+      const out = [];
+      for (let a = 0; a < 2; a++) {
+        const art = artifacts[a];
+
+        if (sel.has(`a${a}.p0`) && (art.power?.[0]?.name ?? "").trim())
+          out.push({ label: art.power[0].name, mod: +1 });
+
+        if (sel.has(`a${a}.p1`) && (art.power?.[1]?.name ?? "").trim())
+          out.push({ label: art.power[1].name, mod: +1 });
+
+        if (sel.has(`a${a}.w`) && (art.weakness?.name ?? "").trim())
+          out.push({ label: art.weakness.name, mod: -1 });
+      }
+      return out;
+    }
+
+    const entries = selectedEntries();
 
     const panel = $(`
       <fieldset class="com-artifacts-roll" style="margin-top:10px; padding:8px; border:1px solid var(--color-border-light-primary); border-radius:6px;">
@@ -690,163 +626,34 @@ Hooks.on("renderRollDialog", async (app, html) => {
           <span>Artifact modifier:</span>
           <strong class="com-artifacts-mod">+0</strong>
         </div>
-
-        <div class="form-group" style="display:flex; justify-content:space-between; align-items:center; margin-top:4px; opacity:.85;">
-          <span>Status:</span>
-          <span class="com-artifacts-status">Pending approval</span>
-        </div>
       </fieldset>
     `);
 
     $form.append(panel);
 
-    function recompute() {
+    function recomputeAndApply() {
       let mod = 0;
       panel.find("input.com-approve:checked").each((_, el) => {
         mod += Number(el.dataset.mod ?? 0);
       });
+
       panel.find(".com-artifacts-mod").text(`${mod >= 0 ? "+" : ""}${mod}`);
-      return mod;
+
+      const base = Number($modInput.data("comArtifactsBaseMod") ?? 0);
+      $modInput.val(base + mod);
+      $modInput.trigger("input");
+      $modInput.trigger("change");
     }
 
-    recompute();
-    panel.on("change", "input.com-approve", recompute);
+    recomputeAndApply();
+    panel.on("change", "input.com-approve", recomputeAndApply);
 
-    // When the player confirms the roll, send artifact entries to GM for approval.
-    // IMPORTANT: We do NOT apply to Custom Modifier here; we wait for GM decision.
+    // Clear selection after roll confirm
     $form.off("submit.comArtifacts").on("submit.comArtifacts", () => {
-      const picked = [];
-      panel.find("input.com-approve:checked").each((_, el) => {
-        const $lbl = $(el).closest("label");
-        const label = ($lbl.find("span").first().text() || "").trim();
-        picked.push({ label, mod: Number(el.dataset.mod ?? 0) });
-      });
-
-      emitCom({
-        module: MODULE_ID,
-        type: "artifactRollRequest",
-        reqId,
-        actorId: actor.id,
-        userId: game.user.id,
-        entries: picked
-      });
+      clearSel(actor.id);
     });
 
   } catch (e) {
     console.error("com-artifacts | renderRollDialog failed", e);
-  }
-});
-
-/* -------------------- GM TagReviewDialog injection + decision sending -------------------- */
-
-function tryGetReviewActorIdFromDialog($root) {
-  // Dialog text usually contains: "<Actor Name> - <Move>"
-  // We try to match actor name from the world.
-  const txt = ($root.text() || "").trim();
-  if (!txt) return null;
-
-  // Prefer exact sheet actor match if any sheet open
-  const sheetActor = Object.values(ui.windows || {})
-    .map(w => w?.actor)
-    .find(a => a?.name && txt.includes(a.name));
-  if (sheetActor?.id) return sheetActor.id;
-
-  // Fallback: scan all actors by name
-  const match = game.actors?.contents?.find(a => a?.name && txt.includes(a.name));
-  return match?.id ?? null;
-}
-
-function getLatestPendingForActor(actorId) {
-  let best = null;
-  for (const [reqId, rec] of globalThis.comArtifactsPendingByReq.entries()) {
-    if (!rec || rec.actorId !== actorId) continue;
-    if (!best || rec.ts > best.ts) best = { reqId, ...rec };
-  }
-  return best;
-}
-
-Hooks.on("renderTagReviewDialog", async (app, html) => {
-  try {
-    // Only GM should be approving others
-    if (!game.user.isGM) return;
-
-    const $root = html.jquery ? html : $(html);
-
-    // prevent duplicate injection
-    $root.find(".com-artifacts-review").remove();
-
-    const actorId = tryGetReviewActorIdFromDialog($root);
-    if (!actorId) return;
-
-    const pending = getLatestPendingForActor(actorId);
-    if (!pending || !pending.entries?.length) return;
-
-    const box = $(`
-      <fieldset class="com-artifacts-review" style="margin-top:10px; padding:8px; border:1px solid var(--color-border-light-primary); border-radius:6px;">
-        <legend>Artifact Tags</legend>
-        <div style="display:flex; flex-direction:column; gap:6px;">
-          ${pending.entries.map(e => `
-            <label style="display:flex; align-items:center; gap:8px;">
-              <input type="checkbox" class="com-approve" data-mod="${Number(e.mod ?? 0)}" checked />
-              <span>${Handlebars.escapeExpression(e.label ?? "")}</span>
-              <span style="margin-left:auto; opacity:.8;">${Number(e.mod ?? 0) > 0 ? "+1" : "-1"}</span>
-            </label>
-          `).join("")}
-        </div>
-        <div class="form-group" style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
-          <span>Approved modifier:</span>
-          <strong class="com-approved-mod">+0</strong>
-        </div>
-      </fieldset>
-    `);
-
-    // Append into dialog content area (works across EnhancedDialog variants)
-    const $content = $root.find(".dialog-content, form, .window-content").first();
-    ($content.length ? $content : $root).append(box);
-
-    function recomputeApproved() {
-      let mod = 0;
-      box.find("input.com-approve:checked").each((_, el) => mod += Number(el.dataset.mod ?? 0));
-      box.find(".com-approved-mod").text(`${mod >= 0 ? "+" : ""}${mod}`);
-      return mod;
-    }
-    recomputeApproved();
-    box.on("change", "input.com-approve", recomputeApproved);
-
-    function collectAccepted() {
-      const accepted = [];
-      box.find("input.com-approve:checked").each((_, el) => {
-        const $lbl = $(el).closest("label");
-        const label = ($lbl.find("span").first().text() || "").trim();
-        accepted.push({ label, mod: Number(el.dataset.mod ?? 0) });
-      });
-      return accepted;
-    }
-
-    // Hook the dialog buttons: confirm + approve all should both finalize artifact approval.
-    // We do not try to change City of Mist's own tag approval logic—only send our artifact decision.
-    const $buttons = $root.find("button").filter((_, b) => {
-      const t = (b.textContent || "").trim().toLowerCase();
-      return t === "confirm" || t === "approve all";
-    });
-
-    $buttons.off("click.comArtifacts").on("click.comArtifacts", () => {
-      const accepted = collectAccepted();
-
-      emitCom({
-        module: MODULE_ID,
-        type: "artifactRollDecision",
-        reqId: pending.reqId,
-        actorId: pending.actorId,
-        userId: pending.userId,
-        accepted
-      });
-
-      // cleanup
-      globalThis.comArtifactsPendingByReq.delete(pending.reqId);
-    });
-
-  } catch (e) {
-    console.error("com-artifacts | renderTagReviewDialog failed", e);
   }
 });
