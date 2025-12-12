@@ -1,90 +1,4 @@
 const MODULE_ID = "com-artifacts";
-const SOCKET = `module.${MODULE_ID}`;
-
-/* -------------------- Socket state -------------------- */
-
-globalThis.comArtifactsPendingRequests ??= new Map();   // GM: requestId -> request
-globalThis.comArtifactsRollUIs ??= new Map();           // Player: requestId -> ui refs
-
-function randomRequestId() {
-  // Foundry has foundry.utils.randomID in newer versions, but keep it simple.
-  return (globalThis.foundry?.utils?.randomID?.() ?? Math.random().toString(36).slice(2) + Date.now().toString(36));
-}
-
-function safeSocketEmit(payload) {
-  try { game.socket.emit(SOCKET, payload); } catch (e) { console.warn(`${MODULE_ID} | socket emit failed`, e); }
-}
-
-function sumDecisionMods(decision) {
-  const arr = Array.isArray(decision?.items) ? decision.items : [];
-  let mod = 0;
-  for (const it of arr) {
-    if (it?.approved) mod += Number(it?.mod ?? 0);
-  }
-  return mod;
-}
-
-Hooks.once("ready", () => {
-  try {
-    game.socket.on(SOCKET, (data) => {
-      try {
-        if (!data || data.module !== MODULE_ID) return;
-
-        // GM receives requests
-        if (data.type === "artifactRequest") {
-          if (!game.user.isGM) return;
-          const req = {
-            requestId: data.requestId,
-            actorId: data.actorId,
-            actorName: data.actorName,
-            userId: data.userId,
-            userName: data.userName,
-            moveLabel: data.moveLabel,
-            items: Array.isArray(data.items) ? data.items : [],
-            created: Date.now()
-          };
-          globalThis.comArtifactsPendingRequests.set(req.requestId, req);
-          // keep only some recent
-          if (globalThis.comArtifactsPendingRequests.size > 50) {
-            const entries = Array.from(globalThis.comArtifactsPendingRequests.entries()).sort((a, b) => a[1].created - b[1].created);
-            for (let i = 0; i < 20; i++) globalThis.comArtifactsPendingRequests.delete(entries[i][0]);
-          }
-          return;
-        }
-
-        // Player receives GM decision
-        if (data.type === "artifactDecision") {
-          if (game.user.isGM) return;
-          if (data.userId !== game.user.id) return;
-
-          const ui = globalThis.comArtifactsRollUIs.get(data.requestId);
-          if (!ui) return;
-
-          ui.decision = data.decision;
-          ui.recomputeAndApply?.();
-          // reflect checkboxes
-          const items = Array.isArray(data.decision?.items) ? data.decision.items : [];
-          for (const it of items) {
-            const $cb = ui.$panel.find(`input.com-approve[data-key="${CSS.escape(it.key)}"]`);
-            if ($cb.length) $cb.prop("checked", !!it.approved);
-          }
-          return;
-        }
-
-        // GM can receive "artifactClear" (optional cleanup)
-        if (data.type === "artifactClear") {
-          if (!game.user.isGM) return;
-          globalThis.comArtifactsPendingRequests.delete(data.requestId);
-          return;
-        }
-      } catch (e) {
-        console.warn(`${MODULE_ID} | socket handler error`, e);
-      }
-    });
-  } catch (e) {
-    console.warn(`${MODULE_ID} | socket init failed`, e);
-  }
-});
 
 /* -------------------- Client-side selection (per-user, persisted) -------------------- */
 
@@ -140,8 +54,8 @@ function toggleSel(actorId, key) {
 }
 
 function clearSel(actorId) {
-  // Clear both in-memory and persisted
-  globalThis.comArtifactsSelection.set(actorId, new Set());
+  globalThis.comArtifactsSelection.delete(actorId);
+  // also clear persisted
   scheduleSaveSelection(actorId);
 }
 
@@ -174,7 +88,9 @@ async function setArtifacts(actor, artifacts) {
   return actor.setFlag(MODULE_ID, "artifacts", artifacts);
 }
 
-function computeArtifactMod(_artifact) {
+function computeArtifactMod(artifact) {
+  if (!artifact) return 0;
+  // unused in this new flow; RollDialog builds +/- from selection
   return 0;
 }
 
@@ -635,56 +551,46 @@ Hooks.on("renderActorSheet", (app, html) => {
   installLockObserver(app, $html);
 });
 
-/* -------------------- RollDialog injection (Player view; GM decision via socket) -------------------- */
+/* -------------------- RollDialog injection (robust, no ui.windows dependency) -------------------- */
 
 function findCustomModifierInput($root) {
+  // Prefer label match
   const labels = $root.find("label").toArray();
   for (const el of labels) {
     const txt = (el.textContent ?? "").trim().toLowerCase();
     if (txt === "custom modifier") {
+      // common CoM layout: label then input in same container
       const $wrap = $(el).closest("div");
       const $input = $wrap.find("input").first();
       if ($input.length) return $input;
     }
   }
+
+  // Fallback: first visible text/number input in dialog
   const $cand = $root.find('input[type="number"], input[type="text"]').filter((_, i) => i.offsetParent !== null).first();
   return $cand.length ? $cand : null;
 }
 
-function buildItemsForApproval(artifacts, selSet) {
-  const items = [];
-
+function buildSelectedEntries(artifacts, selSet) {
+  const out = [];
   for (let a = 0; a < 2; a++) {
     const art = artifacts[a];
-    const p0 = (art.power?.[0]?.name ?? "").trim();
-    const p1 = (art.power?.[1]?.name ?? "").trim();
-    const w = (art.weakness?.name ?? "").trim();
 
-    const pickedP0 = selSet.has(`a${a}.p0`) && p0;
-    const pickedP1 = selSet.has(`a${a}.p1`) && p1;
+    if (selSet.has(`a${a}.p0`) && (art.power?.[0]?.name ?? "").trim())
+      out.push({ label: art.power[0].name, mod: +1 });
 
-    if (pickedP0) {
-      items.push({ key: `a${a}.p0`, label: p0, mod: +1, approved: true, kind: "power", artifactIndex: a });
-      if (w) items.push({ key: `a${a}.w@auto`, label: `Weakness: ${w}`, mod: -1, approved: false, kind: "weakness", artifactIndex: a });
-    }
-    if (pickedP1) {
-      items.push({ key: `a${a}.p1`, label: p1, mod: +1, approved: true, kind: "power", artifactIndex: a });
-      if (w) items.push({ key: `a${a}.w@auto`, label: `Weakness: ${w}`, mod: -1, approved: false, kind: "weakness", artifactIndex: a });
-    }
+    if (selSet.has(`a${a}.p1`) && (art.power?.[1]?.name ?? "").trim())
+      out.push({ label: art.power[1].name, mod: +1 });
 
-    // If player explicitly highlighted weakness, include it as a normal selectable weakness too.
-    if (selSet.has(`a${a}.w`) && w) {
-      items.push({ key: `a${a}.w`, label: `Weakness: ${w}`, mod: -1, approved: false, kind: "weakness", artifactIndex: a });
-    }
+    if (selSet.has(`a${a}.w`) && (art.weakness?.name ?? "").trim())
+      out.push({ label: art.weakness.name, mod: -1 });
   }
-
-  // de-dupe by key (keep first)
-  const seen = new Set();
-  return items.filter(it => (seen.has(it.key) ? false : (seen.add(it.key), true)));
+  return out;
 }
 
 Hooks.on("renderRollDialog", async (app, html) => {
   try {
+    // Some CoM refresh cycles can pass odd html; fall back to app.element.
     const $root =
       html?.jquery ? html :
       html ? $(html) :
@@ -707,34 +613,34 @@ Hooks.on("renderRollDialog", async (app, html) => {
     const $modInput = findCustomModifierInput($root);
     if (!$modInput || !$modInput.length) return;
 
+    // Base modifier capture (per dialog instance)
     if (!Number.isFinite(app._comArtifactsBaseMod)) {
       const base = Number($modInput.val() ?? 0);
       app._comArtifactsBaseMod = Number.isFinite(base) ? base : 0;
     }
 
     const artifacts = await getArtifacts(actor);
-    const sel = getSel(actor.id);
-    const items = buildItemsForApproval(artifacts, sel);
 
+    // IMPORTANT: selection must come from THIS USER (persisted), not GM.
+    // getSel() hydrates from user flag, so it survives refresh.
+    const sel = getSel(actor.id);
+
+    const entries = buildSelectedEntries(artifacts, sel);
+
+    // Where to insert: prefer form if it exists, else insert into dialog content.
     const $form = $root.find("form").first();
     const $mount = $form.length ? $form : $root;
 
-    const requestId = app._comArtifactsRequestId ?? randomRequestId();
-    app._comArtifactsRequestId = requestId;
-
-    // Player-facing panel (read-only)
     const $panel = $(`
       <fieldset class="com-artifacts-roll" style="margin-top:10px; padding:8px; border:1px solid var(--color-border-light-primary); border-radius:6px;">
         <legend>Artifacts</legend>
 
-        <div style="opacity:.85; margin-bottom:6px;">Waiting for GM approval.</div>
-
         <div class="com-artifacts-approve" style="display:flex; flex-direction:column; gap:6px;">
           ${
-            items.length
-              ? items.map(e => `
+            entries.length
+              ? entries.map(e => `
                 <label style="display:flex; align-items:center; gap:8px;">
-                  <input type="checkbox" class="com-approve" data-key="${Handlebars.escapeExpression(e.key)}" data-mod="${e.mod}" ${e.approved ? "checked" : ""} disabled />
+                  <input type="checkbox" class="com-approve" data-mod="${e.mod}" checked />
                   <span>${Handlebars.escapeExpression(e.label)}</span>
                   <span style="margin-left:auto; opacity:.8;">${e.mod > 0 ? "+1" : "-1"}</span>
                 </label>
@@ -752,159 +658,29 @@ Hooks.on("renderRollDialog", async (app, html) => {
 
     $mount.append($panel);
 
-    const ui = {
-      requestId,
-      actorId: actor.id,
-      actorName: actor.name,
-      $panel,
-      $modInput,
-      base: app._comArtifactsBaseMod ?? 0,
-      decision: { items: items.map(it => ({ key: it.key, mod: it.mod, approved: !!it.approved, label: it.label })) },
-      recomputeAndApply: null
-    };
-
-    ui.recomputeAndApply = function () {
-      const mod = sumDecisionMods(ui.decision);
-      ui.$panel.find(".com-artifacts-mod").text(`${mod >= 0 ? "+" : ""}${mod}`);
-      ui.$modInput.val((ui.base ?? 0) + mod);
-      ui.$modInput.trigger("input");
-      ui.$modInput.trigger("change");
-    };
-
-    globalThis.comArtifactsRollUIs.set(requestId, ui);
-    ui.recomputeAndApply();
-
-    // Send request to GM (only from non-GM users)
-    if (!game.user.isGM) {
-      safeSocketEmit({
-        module: MODULE_ID,
-        type: "artifactRequest",
-        requestId,
-        actorId: actor.id,
-        actorName: actor.name,
-        userId: game.user.id,
-        userName: game.user.name,
-        moveLabel: app?.title ?? "",
-        items: items.map(it => ({ key: it.key, label: it.label, mod: it.mod, approved: !!it.approved }))
+    function recomputeAndApply() {
+      let mod = 0;
+      $panel.find("input.com-approve:checked").each((_, el) => {
+        mod += Number(el.dataset.mod ?? 0);
       });
+
+      $panel.find(".com-artifacts-mod").text(`${mod >= 0 ? "+" : ""}${mod}`);
+
+      // Apply to Custom Modifier
+      $modInput.val((app._comArtifactsBaseMod ?? 0) + mod);
+      $modInput.trigger("input");
+      $modInput.trigger("change");
     }
 
-    // Cleanup on submit: clear selection and tell GM to drop request
+    recomputeAndApply();
+    $panel.on("change", "input.com-approve", recomputeAndApply);
+
+    // On submit/confirm: clear selection for THIS actor (optional)
     $mount.off("submit.comArtifacts").on("submit.comArtifacts", () => {
-      try { clearSel(actor.id); } catch (_) {}
-      try { globalThis.comArtifactsRollUIs.delete(requestId); } catch (_) {}
-      safeSocketEmit({ module: MODULE_ID, type: "artifactClear", requestId });
+      clearSel(actor.id);
     });
 
   } catch (e) {
     console.error("com-artifacts | renderRollDialog failed", e);
-  }
-});
-
-/* -------------------- TagReviewDialog injection (GM approval UI) -------------------- */
-
-function findActorFromTagReviewDialog($root) {
-  // The dialog text usually includes: "Mr Deamonguy - Go Toe To Toe"
-  const text = ($root.text() ?? "").trim();
-  // Try to match "<actor> - <move>"
-  const m = text.match(/^\s*Review Tags[\s\S]*?\n[\s\S]*?\n([\s\S]+?)\s*-\s*([^\n\r]+)/m);
-  if (m && m[1]) {
-    const actorName = (m[1] ?? "").trim();
-    const actor = game.actors?.find?.(a => a.name === actorName);
-    if (actor) return actor;
-  }
-  // Fallback: if only one controlled token, use it
-  const tokActor = canvas?.tokens?.controlled?.[0]?.actor;
-  if (tokActor) return tokActor;
-  return null;
-}
-
-function findLatestRequestForActor(actorId) {
-  const reqs = Array.from(globalThis.comArtifactsPendingRequests.values())
-    .filter(r => r.actorId === actorId)
-    .sort((a, b) => b.created - a.created);
-  return reqs[0] ?? null;
-}
-
-Hooks.on("renderTagReviewDialog", (app, html) => {
-  try {
-    if (!game.user.isGM) return;
-
-    const $root = html?.jquery ? html : $(html);
-    if (!$root || !$root.length) return;
-
-    // avoid double inject
-    if ($root.find(".com-artifacts-gm").length) return;
-
-    const actor = findActorFromTagReviewDialog($root);
-    if (!actor) return;
-
-    const req = findLatestRequestForActor(actor.id);
-    if (!req || !req.items?.length) return;
-
-    // Insert into dialog near SelectedItems header if possible
-    const $selectedHeader = $root.find("*").filter((_, el) => (el.textContent ?? "").trim() === "SelectedItems").first();
-    const $anchor = $selectedHeader.length ? $selectedHeader.closest("div") : $root.find(".dialog-content, form").first();
-    if (!$anchor.length) return;
-
-    const items = req.items.map(it => ({ ...it, approved: !!it.approved }));
-
-    const $panel = $(`
-      <fieldset class="com-artifacts-gm" style="margin-top:10px; padding:8px; border:1px solid var(--color-border-light-primary); border-radius:6px;">
-        <legend>Artifacts (GM)</legend>
-
-        <div class="com-artifacts-approve" style="display:flex; flex-direction:column; gap:6px;">
-          ${
-            items.map(e => `
-              <label style="display:flex; align-items:center; gap:8px;">
-                <input type="checkbox" class="com-approve" data-key="${Handlebars.escapeExpression(e.key)}" data-mod="${e.mod}" ${e.approved ? "checked" : ""} />
-                <span>${Handlebars.escapeExpression(e.label)}</span>
-                <span style="margin-left:auto; opacity:.8;">${e.mod > 0 ? "+1" : "-1"}</span>
-              </label>
-            `).join("")
-          }
-        </div>
-
-        <div class="form-group" style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
-          <span>Artifact modifier:</span>
-          <strong class="com-artifacts-mod">+0</strong>
-        </div>
-      </fieldset>
-    `);
-
-    $anchor.append($panel);
-
-    function readDecision() {
-      const decisionItems = [];
-      $panel.find("input.com-approve").each((_, el) => {
-        decisionItems.push({
-          key: el.dataset.key,
-          mod: Number(el.dataset.mod ?? 0),
-          approved: !!el.checked
-        });
-      });
-      return { items: decisionItems };
-    }
-
-    function pushDecision() {
-      const decision = readDecision();
-      const mod = sumDecisionMods(decision);
-      $panel.find(".com-artifacts-mod").text(`${mod >= 0 ? "+" : ""}${mod}`);
-
-      safeSocketEmit({
-        module: MODULE_ID,
-        type: "artifactDecision",
-        requestId: req.requestId,
-        userId: req.userId,
-        decision
-      });
-    }
-
-    // Initial push so player gets the GM-side truth even if timing is weird
-    pushDecision();
-    $panel.on("change", "input.com-approve", pushDecision);
-
-  } catch (e) {
-    console.error("com-artifacts | renderTagReviewDialog failed", e);
   }
 });
