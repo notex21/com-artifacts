@@ -1,5 +1,164 @@
 const MODULE_ID = "com-artifacts";
 
+/* =====================================================================================
+ * GM MIRROR FOR ROLLDIALOG (socket-based)
+ * - Player opens RollDialog -> sends artifact checkbox list to GM
+ * - GM toggles -> sends back -> player dialog updates live
+ * ===================================================================================== */
+const COMA_SOCKET = `module.${MODULE_ID}`;
+
+// Track open RollDialogs on THIS client by requestId -> app instance
+globalThis._comaOpenRollDialogs ??= new Map();
+
+// Utilities
+function comaGetActiveGMUserIds() {
+  return game.users.filter(u => u.active && u.isGM).map(u => u.id);
+}
+
+function comaExtractArtifactBoxesFromApp(app) {
+  // We only mirror the artifact checkboxes we injected: input.com-approve
+  const $root =
+    app?.element ? (app.element.jquery ? app.element : $(app.element)) :
+    null;
+
+  if (!$root || !$root.length) return [];
+
+  const $panel = $root.find(".com-artifacts-roll");
+  if (!$panel.length) return [];
+
+  const out = [];
+  $panel.find("input.com-approve").each((idx, el) => {
+    const $label = $(el).closest("label");
+    // Our label structure: checkbox + span(label) + span(+1/-1)
+    const labelText = ($label.find("span").first().text() ?? "").trim();
+    out.push({
+      idx,
+      label: labelText || `Artifact ${idx + 1}`,
+      mod: Number(el.dataset.mod ?? 0),
+      checked: !!el.checked,
+      disabled: !!el.disabled
+    });
+  });
+
+  return out;
+}
+
+function comaApplyArtifactBoxesToApp(app, boxes) {
+  const $root =
+    app?.element ? (app.element.jquery ? app.element : $(app.element)) :
+    null;
+  if (!$root || !$root.length) return;
+
+  const $panel = $root.find(".com-artifacts-roll");
+  if (!$panel.length) return;
+
+  const $inputs = $panel.find("input.com-approve");
+  if (!$inputs.length) return;
+
+  // Apply by index (stable because we render from entries order)
+  for (const b of boxes) {
+    const el = $inputs.get(b.idx);
+    if (!el) continue;
+    if (el.disabled) continue;
+
+    const changed = el.checked !== b.checked;
+    el.checked = b.checked;
+
+    // Trigger change handlers so your recomputeAndApply runs
+    if (changed) el.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  // If you stored recompute on app, call it as a safety net
+  if (typeof app._comArtifactsRecompute === "function") {
+    try { app._comArtifactsRecompute(); } catch (_) {}
+  }
+}
+
+function comaOpenGMMirrorDialog(payload) {
+  const { requestId, fromUserId, fromUserName, boxes } = payload;
+
+  const content = `
+    <form class="coma-gm-mirror">
+      <p><strong>Player:</strong> ${fromUserName}</p>
+      <p>Toggle artifact modifiers, then click <strong>Apply</strong> to push to the player.</p>
+      <hr/>
+      <div style="max-height: 420px; overflow:auto; padding-right: 6px;">
+        ${
+          boxes.length
+            ? boxes.map(b => `
+              <div style="display:flex; gap:8px; align-items:center; margin:6px 0;">
+                <input type="checkbox"
+                       data-idx="${b.idx}"
+                       ${b.checked ? "checked" : ""}
+                       ${b.disabled ? "disabled" : ""}/>
+                <span>${Handlebars.escapeExpression(b.label ?? `Artifact ${b.idx + 1}`)}</span>
+                <span style="margin-left:auto; opacity:.8;">${(b.mod ?? 0) > 0 ? "+1" : "-1"}</span>
+              </div>
+            `).join("")
+            : `<div style="opacity:.8;">No artifact modifiers found.</div>`
+        }
+      </div>
+    </form>
+  `;
+
+  new Dialog({
+    title: "Roll Modifiers (GM Mirror)",
+    content,
+    buttons: {
+      apply: {
+        icon: '<i class="fas fa-check"></i>',
+        label: "Apply",
+        callback: (html) => {
+          const el = html?.[0];
+          const inputs = Array.from(el.querySelectorAll('input[type="checkbox"][data-idx]'));
+
+          const updated = boxes.map(b => {
+            const inp = inputs.find(i => Number(i.getAttribute("data-idx")) === b.idx);
+            return { ...b, checked: inp ? inp.checked : b.checked };
+          });
+
+          game.socket.emit(COMA_SOCKET, {
+            type: "coma-gm-update",
+            requestId,
+            toUserId: fromUserId,
+            boxes: updated
+          });
+        }
+      },
+      close: { label: "Close" }
+    },
+    default: "apply"
+  }).render(true);
+}
+
+Hooks.once("ready", () => {
+  // Socket receive
+  game.socket.on(COMA_SOCKET, (msg) => {
+    if (!msg || !msg.type) return;
+
+    // GM gets the mirror request
+    if (msg.type === "coma-mirror-request" && game.user.isGM) {
+      comaOpenGMMirrorDialog(msg);
+      return;
+    }
+
+    // Player gets GM updates
+    if (msg.type === "coma-gm-update" && msg.toUserId === game.user.id) {
+      const app = globalThis._comaOpenRollDialogs.get(msg.requestId);
+      if (app) {
+        comaApplyArtifactBoxesToApp(app, msg.boxes ?? []);
+      }
+      return;
+    }
+  });
+});
+
+// Cleanup tracking when an app closes
+Hooks.on("closeApplication", (app) => {
+  if (!app?._comaMirrorRequestId) return;
+  globalThis._comaOpenRollDialogs.delete(app._comaMirrorRequestId);
+});
+
 /* -------------------- Client-side selection (per-user, persisted) -------------------- */
 
 /**
@@ -638,7 +797,7 @@ Hooks.on("renderRollDialog", async (app, html) => {
         <div class="com-artifacts-approve" style="display:flex; flex-direction:column; gap:6px;">
           ${
             entries.length
-              ? entries.map(e => `
+              ? entries.map((e, i) => `
                 <label style="display:flex; align-items:center; gap:8px;">
                   <input type="checkbox" class="com-approve" data-mod="${e.mod}" checked />
                   <span>${Handlebars.escapeExpression(e.label)}</span>
@@ -672,8 +831,38 @@ Hooks.on("renderRollDialog", async (app, html) => {
       $modInput.trigger("change");
     }
 
+    // Expose for GM mirror updates (safe no-op if unused)
+    app._comArtifactsRecompute = recomputeAndApply;
+
     recomputeAndApply();
     $panel.on("change", "input.com-approve", recomputeAndApply);
+
+    // === GM MIRROR INTEGRATION START ===
+    // Only the PLAYER sends mirror requests. GM doesn't need to mirror their own dialog.
+    if (!game.user.isGM) {
+      // Create one requestId per dialog instance
+      if (!app._comaMirrorRequestId) app._comaMirrorRequestId = foundry.utils.randomID();
+
+      // Track this open dialog locally so we can apply GM updates
+      globalThis._comaOpenRollDialogs.set(app._comaMirrorRequestId, app);
+
+      const gmIds = comaGetActiveGMUserIds();
+      if (gmIds.length) {
+        const boxes = comaExtractArtifactBoxesFromApp(app);
+
+        // Only send if our artifact panel actually exists and has checkboxes
+        if (boxes.length) {
+          game.socket.emit(COMA_SOCKET, {
+            type: "coma-mirror-request",
+            requestId: app._comaMirrorRequestId,
+            fromUserId: game.user.id,
+            fromUserName: game.user.name,
+            boxes
+          });
+        }
+      }
+    }
+    // === GM MIRROR INTEGRATION END ===
 
     // On submit/confirm: clear selection for THIS actor (optional)
     $mount.off("submit.comArtifacts").on("submit.comArtifacts", () => {
