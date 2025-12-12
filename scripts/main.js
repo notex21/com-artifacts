@@ -102,58 +102,6 @@ async function disarmArtifact(actor) {
  *
  * This avoids any dependence on CoM internal APIs.
  */
-Hooks.on("preCreateChatMessage", async (doc, data, options, userId) => {
-  try {
-    // 1. Ignore messages created by this module itself
-    if (data.flags?.["com-artifacts"]?.internal) return;
-
-    // 2. Only react to messages that actually contain a roll
-    const rolls = data.rolls ?? [];
-    if (!Array.isArray(rolls) || rolls.length === 0) return;
-
-    // 3. Identify the actor
-    const speaker = data.speaker;
-    const actorId = speaker?.actor;
-    if (!actorId) return;
-
-    const actor = game.actors.get(actorId);
-    if (!actor) return;
-
-    // 4. Check if an artifact is armed
-    const armed = await actor.getFlag("com-artifacts", "armed");
-    if (!armed) return;
-
-    // 5. Consume immediately (VERY IMPORTANT)
-    await actor.unsetFlag("com-artifacts", "armed");
-
-    const artifact = armed.artifactSnapshot;
-    const mod = Number(armed.modifier ?? 0);
-
-    // 6. Post artifact card (marked as internal!)
-    await ChatMessage.create({
-      user: game.user.id,
-      speaker: ChatMessage.getSpeaker({ actor }),
-      content: `
-        <div class="chat-card">
-          <header class="card-header">
-            <h3>Artifact Applied: ${artifact.name}</h3>
-          </header>
-          <div class="card-content">
-            <p><strong>Modifier:</strong> ${mod >= 0 ? "+" : ""}${mod}</p>
-          </div>
-        </div>
-      `,
-      flags: {
-        "com-artifacts": {
-          internal: true
-        }
-      }
-    });
-
-  } catch (err) {
-    console.error("com-artifacts hook error:", err);
-  }
-});
 
 /* -------------------- Sheet UI -------------------- */
 
