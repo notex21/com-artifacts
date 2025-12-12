@@ -151,7 +151,14 @@ function ensureArtifactsTab(app, html, actor) {
       .com-artifact header { display:flex; gap:10px; align-items:center; }
       .com-artifact .img { width:64px; height:64px; border:1px solid var(--color-border-light-primary); border-radius:6px; background-size:cover; background-position:center; }
       .com-artifact .controls { display:flex; gap:8px; margin-top:8px; }
-      .com-artifact .tag-row { display:flex; gap:8px; align-items:center; margin:6px 0; }
+      .com-artifact .tag-row{
+  display:flex;
+  justify-content:center;   /* CENTER CONTENT IN COLUMN */
+  align-items:center;
+  gap:6px;
+  margin:6px 0;
+}
+
       .com-artifact .tag-row input[type="text"] { flex: 1; }
 
       .com-tag-pick { display:inline-block; padding:2px 6px; border-radius:4px; cursor:pointer; user-select:none; }
