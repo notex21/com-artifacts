@@ -134,6 +134,12 @@ function installLockObserver(app, html) {
       const $root = $(root);
       const editable = isSheetEditable($root);
       setArtifactsEditable($root, editable);
+      if (!isOwner) {
+  tab.find(".com-edit-tag").hide();
+  tab.find(".com-tag-pick").removeClass("com-editing");
+  tab.find(".com-tag-pick").each((_, el) => el.contentEditable = "false");
+}
+
     } catch (_) {}
   });
 
@@ -144,7 +150,8 @@ function installLockObserver(app, html) {
 /* -------------------- Sheet UI: Add "Artifacts" tab -------------------- */
 
 function ensureArtifactsTab(app, html, actor) {
-  if (!actor?.testUserPermission(game.user, "OWNER")) return;
+  const isOwner = actor?.testUserPermission(game.user, "OWNER");
+
 
   // Inject minimal CSS once
   if (!document.getElementById("com-artifacts-inline-style")) {
