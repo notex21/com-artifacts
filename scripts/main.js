@@ -308,3 +308,132 @@ Hooks.on("renderActorSheet", (app, html) => {
   if (!actor) return;
   addArtifactsTab(app, html, actor);
 });
+const COM_ART_MODULE = "com-artifacts";
+
+// Reuse your existing flag format (artifacts stored on actor flags)
+async function comGetArtifacts(actor) {
+  const data = (await actor.getFlag(COM_ART_MODULE, "artifacts")) ?? null;
+  if (!Array.isArray(data) || data.length < 2) return null;
+  return data;
+}
+
+function comComputeArtifactMod(artifact) {
+  if (!artifact) return 0;
+  let mod = 0;
+  for (const p of artifact.power ?? []) {
+    if (p?.active && (p?.name ?? "").trim()) mod += 1;
+  }
+  const w = artifact.weakness;
+  if (w?.active && (w?.name ?? "").trim()) mod -= 1;
+  return mod;
+}
+
+function comFindModInput(html) {
+  // Try the most common input names used by roll dialogs
+  const candidates = [
+    'input[name="modifier"]',
+    'input[name="mod"]',
+    'input[name="bonus"]',
+    'input[name="rollMod"]',
+    'input[name="rollModifier"]'
+  ];
+
+  for (const sel of candidates) {
+    const el = html.find(sel);
+    if (el.length) return el.first();
+  }
+
+  // Fallback: first number input in the dialog
+  const numberInputs = html.find('input[type="number"]');
+  if (numberInputs.length) return numberInputs.first();
+
+  return null;
+}
+
+Hooks.on("renderRollDialog", async (app, html) => {
+  try {
+    // Best-effort actor resolution
+    const actor =
+      app.actor ??
+      app.options?.actor ??
+      (app.options?.actorId ? game.actors.get(app.options.actorId) : null) ??
+      game.user.character;
+
+    if (!actor) return;
+
+    const artifacts = await comGetArtifacts(actor);
+    if (!artifacts) return;
+
+    // Build UI
+    const panel = $(`
+      <fieldset class="com-artifacts-roll" style="margin-top:10px; padding:8px; border:1px solid var(--color-border-light-primary); border-radius:6px;">
+        <legend>Artifacts</legend>
+
+        <div class="form-group" style="display:flex; gap:8px; align-items:center;">
+          <label style="flex:0 0 auto;">Use:</label>
+          <select name="comArtifactSlot" style="flex:1;">
+            <option value="0">${artifacts[0]?.name ?? "Artifact 1"}</option>
+            <option value="1">${artifacts[1]?.name ?? "Artifact 2"}</option>
+            <option value="-1">None</option>
+          </select>
+        </div>
+
+        <div class="form-group" style="display:flex; justify-content:space-between; align-items:center;">
+          <span>Computed modifier:</span>
+          <strong class="com-artifacts-mod">+0</strong>
+        </div>
+
+        <p class="notes" style="margin:0;">
+          Modifier = +1 per active Power tag, -1 per active Weakness tag (as toggled on the sheet).
+        </p>
+      </fieldset>
+    `);
+
+    // Insert panel near the bottom of the dialog form
+    const form = html.find("form");
+    if (form.length) form.append(panel);
+    else html.append(panel);
+
+    const modInput = comFindModInput(html);
+
+    function updateDisplayedMod() {
+      const slot = Number(panel.find('select[name="comArtifactSlot"]').val());
+      let mod = 0;
+      if (slot === 0 || slot === 1) mod = comComputeArtifactMod(artifacts[slot]);
+      const sign = mod >= 0 ? "+" : "";
+      panel.find(".com-artifacts-mod").text(`${sign}${mod}`);
+      return mod;
+    }
+
+    updateDisplayedMod();
+
+    panel.on("change", 'select[name="comArtifactSlot"]', () => {
+      updateDisplayedMod();
+    });
+
+    // Intercept submit: add artifact mod into the modifier field right before rolling
+    // We hook the submit button click so it works regardless of RollDialog internals.
+    const submitButtons = html.find('button[type="submit"], button.roll, button[name="roll"]');
+
+    submitButtons.on("click.comArtifacts", () => {
+      const mod = updateDisplayedMod();
+      if (!mod) return;
+
+      if (!modInput || !modInput.length) {
+        ui.notifications?.warn("Artifacts: Could not find a modifier input in this RollDialog.");
+        return;
+      }
+
+      const current = Number(modInput.val() ?? 0);
+      const next = (Number.isFinite(current) ? current : 0) + mod;
+      modInput.val(next);
+
+      // Optional: small visual confirmation in the dialog
+      // (prevents “did it apply?” confusion)
+      panel.find(".com-artifacts-mod").text(`${mod >= 0 ? "+" : ""}${mod} (applied)`);
+    });
+
+  } catch (e) {
+    console.error("com-artifacts | renderRollDialog failed", e);
+  }
+});
