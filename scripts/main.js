@@ -1,3 +1,16 @@
+console.warn("com-artifacts | main.js LOADED", {
+  user: game?.user?.name,
+  isGM: game?.user?.isGM,
+  moduleActive: game?.modules?.get?.("com-artifacts")?.active
+});
+
+Hooks.once("ready", () => {
+  console.warn("com-artifacts | READY", {
+    user: game.user.name,
+    isGM: game.user.isGM
+  });
+});
+
 const MODULE_ID = "com-artifacts";
 const SOCKET = `module.${MODULE_ID}`;
 
