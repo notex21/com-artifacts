@@ -836,3 +836,15 @@ Hooks.on("renderTagReviewDialog", async (app, html) => {
     console.error("com-artifacts | renderTagReviewDialog failed", e);
   }
 });
+(() => {
+  const apps = Object.values(ui.windows ?? {});
+  const out = apps.map(a => ({
+    appId: a.appId,
+    title: a.title,
+    cls: a.constructor?.name,
+    id: a.id
+  }));
+  console.table(out);
+  return out;
+})()
+
