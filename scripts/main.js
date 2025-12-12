@@ -158,15 +158,30 @@ function ensureArtifactsTab(app, html, actor) {
       .com-tag-pick.com-picked { background: #ffeb3b; }
       .com-tag-pick.com-weak.com-picked { background: #ffd54f; }
 
-      .com-edit-tag {
-        background: none;
-        border: none;
-        padding: 0 4px;
-        cursor: pointer;
-        opacity: .65;
-        font-size: 12px;
-        line-height: 1;
-      }
+      .com-edit-tag{
+  background:none !important;
+  border:none !important;
+
+  width:14px !important;
+  min-width:14px !important;
+  max-width:14px !important;
+
+  height:14px !important;
+  min-height:14px !important;
+
+  padding:0 !important;
+  margin:0 !important;
+
+  display:inline-flex !important;
+  align-items:center !important;
+  justify-content:center !important;
+
+  cursor:pointer;
+  opacity:.65;
+  font-size:11px;
+  line-height:1;
+}
+
       .com-edit-tag:hover { opacity: 1; }
 
       .com-artifact .hint { opacity: .8; font-size: 12px; margin-top: 8px; }
