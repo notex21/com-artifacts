@@ -1,59 +1,188 @@
 const MODULE_ID = "com-artifacts";
 
 /* =====================================================================================
- * SOCKET: GM MIRROR (optional approval UI)
+ * SOCKET: GM APPROVAL (Artifacts + Normal Tags)
  * ===================================================================================== */
 const COMA_SOCKET = `module.${MODULE_ID}`;
 globalThis._comaOpenRollDialogs ??= new Map();
+globalThis._comaGMReviewAnchor ??= null; // {left, top, width, height}
 
 function comaLog(...a) { console.log(`${MODULE_ID} |`, ...a); }
 
+/** Basic escape */
+function esc(s) { return Handlebars.escapeExpression(String(s ?? "")); }
+
+/** Place GM dialogs next to each other (best effort) */
+function positionGMDialog(app) {
+  try {
+    const a = globalThis._comaGMReviewAnchor;
+    if (!a) return;
+    app.setPosition({ left: a.left + (a.width ?? 380) + 10, top: a.top });
+  } catch (_) {}
+}
+
+/* =====================================================================================
+ * READY: SOCKET LISTENER
+ * ===================================================================================== */
 Hooks.once("ready", () => {
   comaLog("READY", { user: game.user?.name, isGM: game.user?.isGM });
 
-  game.socket.on(COMA_SOCKET, (msg) => {
+  game.socket.on(COMA_SOCKET, async (msg) => {
     try {
       if (!msg?.type) return;
 
-      // GM receives request -> show mirror dialog
-      if (msg.type === "coma-mirror-request" && game.user.isGM) {
+      /* ----------------------------- GM: ARTIFACT REVIEW ----------------------------- */
+      if (msg.type === "coma-approval-artifacts-request" && game.user.isGM) {
         const entries = Array.isArray(msg.entries) ? msg.entries : [];
+        const artifactsMeta = Array.isArray(msg.artifactsMeta) ? msg.artifactsMeta : [];
+
+        // Render weakness toggles per artifact where any power from that artifact is selected
+        const powerSelectedByArtifact = new Map(); // idx -> true
+        for (const e of entries) {
+          if (e?.kind === "artifact-power" && Number.isFinite(e.artifactIdx)) {
+            powerSelectedByArtifact.set(Number(e.artifactIdx), true);
+          }
+        }
+
+        const weaknessBlocks = artifactsMeta
+          .filter(m => powerSelectedByArtifact.get(Number(m.artifactIdx)))
+          .map(m => {
+            const wLabel = (m.weaknessLabel ?? "").trim();
+            if (!wLabel) return "";
+            return `
+              <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
+                <input type="checkbox" class="coma-art-weak" data-artifact-idx="${Number(m.artifactIdx)}" />
+                <span><strong>Add weakness:</strong> ${esc(wLabel)}</span>
+                <span style="margin-left:auto; opacity:.8;">-1</span>
+              </label>
+            `;
+          })
+          .join("");
 
         const content = `
           <div>
             <div style="opacity:.85; margin-bottom:6px;">
-              <div><strong>From:</strong> ${Handlebars.escapeExpression(msg.fromUserName ?? "")}</div>
-              <div><strong>Actor:</strong> ${Handlebars.escapeExpression(msg.actorName ?? "")}</div>
+              <div><strong>From:</strong> ${esc(msg.fromUserName ?? "")}</div>
+              <div><strong>Actor:</strong> ${esc(msg.actorName ?? "")}</div>
             </div>
 
             <fieldset style="padding:8px; border:1px solid var(--color-border-light-primary); border-radius:6px;">
-              <legend>Artifacts (Mirror)</legend>
+              <legend>Artifacts (GM Review)</legend>
+
               <div style="display:flex; flex-direction:column; gap:6px; max-height:320px; overflow:auto;">
                 ${
                   entries.length
                     ? entries.map((e) => `
                       <label style="display:flex; align-items:center; gap:8px;">
-                        <input type="checkbox" class="coma-approve" data-idx="${Number(e.idx)}" ${e.checked ? "checked" : ""}/>
-                        <span>${Handlebars.escapeExpression(e.label ?? "")}</span>
+                        <input type="checkbox" class="coma-approve-art" data-idx="${Number(e.idx)}" ${e.checked ? "checked" : ""}/>
+                        <span>${esc(e.label ?? "")}</span>
                         <span style="margin-left:auto; opacity:.8;">${Number(e.mod) > 0 ? "+1" : "-1"}</span>
                       </label>
                     `).join("")
-                    : `<div style="opacity:.8;">No highlighted artifact tags.</div>`
+                    : `<div style="opacity:.8;">No artifact tags requested.</div>`
+                }
+              </div>
+
+              ${weaknessBlocks ? `<hr style="opacity:.35; margin:8px 0;">${weaknessBlocks}` : ``}
+            </fieldset>
+          </div>
+        `;
+
+        const d = new Dialog({
+          title: "Review: Artifacts",
+          content,
+          buttons: {
+            apply: {
+              label: "Confirm",
+              callback: (html) => {
+                const root = html?.[0];
+                const checks = Array.from(root.querySelectorAll("input.coma-approve-art[data-idx]"));
+
+                const toggles = entries.map((e) => {
+                  const idx = Number(e.idx);
+                  const c = checks.find(x => Number(x.getAttribute("data-idx")) === idx);
+                  return { ...e, checked: c ? c.checked : !!e.checked };
+                });
+
+                // Weakness adds: map artifactIdx -> true
+                const weakChecks = Array.from(root.querySelectorAll("input.coma-art-weak[data-artifact-idx]"));
+                const addWeaknessFor = weakChecks
+                  .filter(c => c.checked)
+                  .map(c => Number(c.getAttribute("data-artifact-idx")));
+
+                game.socket.emit(COMA_SOCKET, {
+                  type: "coma-approval-artifacts-result",
+                  requestId: msg.requestId,
+                  toUserId: msg.fromUserId,
+                  toggles,
+                  addWeaknessFor
+                });
+              }
+            },
+            close: { label: "Close" }
+          },
+          default: "apply",
+          render: (html) => {
+            try {
+              // first GM review dialog becomes anchor
+              const app = html?.closest?.(".app")?.data?.("app") ?? null;
+              if (app?.position) globalThis._comaGMReviewAnchor = { ...app.position };
+            } catch (_) {}
+          }
+        });
+
+        d.render(true);
+
+        // Best-effort: anchor after render, then position next dialogs to the right
+        setTimeout(() => {
+          try {
+            const app = d;
+            if (app?.position) globalThis._comaGMReviewAnchor = { ...app.position };
+          } catch (_) {}
+        }, 0);
+
+        return;
+      }
+
+      /* ------------------------------ GM: NORMAL REVIEW ------------------------------ */
+      if (msg.type === "coma-approval-normal-request" && game.user.isGM) {
+        const entries = Array.isArray(msg.entries) ? msg.entries : [];
+
+        const content = `
+          <div>
+            <div style="opacity:.85; margin-bottom:6px;">
+              <div><strong>From:</strong> ${esc(msg.fromUserName ?? "")}</div>
+              <div><strong>Actor:</strong> ${esc(msg.actorName ?? "")}</div>
+            </div>
+
+            <fieldset style="padding:8px; border:1px solid var(--color-border-light-primary); border-radius:6px;">
+              <legend>Normal Tags (GM Review)</legend>
+              <div style="display:flex; flex-direction:column; gap:6px; max-height:320px; overflow:auto;">
+                ${
+                  entries.length
+                    ? entries.map((e) => `
+                      <label style="display:flex; align-items:center; gap:8px;">
+                        <input type="checkbox" class="coma-approve-norm" data-idx="${Number(e.idx)}" ${e.checked ? "checked" : ""}/>
+                        <span>${esc(e.label ?? "")}</span>
+                        <span style="margin-left:auto; opacity:.8;">${Number(e.mod) > 0 ? "+1" : "-1"}</span>
+                      </label>
+                    `).join("")
+                    : `<div style="opacity:.8;">No normal tags detected.</div>`
                 }
               </div>
             </fieldset>
           </div>
         `;
 
-        new Dialog({
-          title: "Review Tags",
+        const d = new Dialog({
+          title: "Review: Normal Tags",
           content,
           buttons: {
             apply: {
-              label: "Approve",
+              label: "Confirm",
               callback: (html) => {
                 const root = html?.[0];
-                const checks = Array.from(root.querySelectorAll("input.coma-approve[data-idx]"));
+                const checks = Array.from(root.querySelectorAll("input.coma-approve-norm[data-idx]"));
                 const toggles = entries.map((e) => {
                   const idx = Number(e.idx);
                   const c = checks.find(x => Number(x.getAttribute("data-idx")) === idx);
@@ -61,7 +190,7 @@ Hooks.once("ready", () => {
                 });
 
                 game.socket.emit(COMA_SOCKET, {
-                  type: "coma-mirror-result",
+                  type: "coma-approval-normal-result",
                   requestId: msg.requestId,
                   toUserId: msg.fromUserId,
                   toggles
@@ -71,34 +200,76 @@ Hooks.once("ready", () => {
             close: { label: "Close" }
           },
           default: "apply"
-        }).render(true);
+        });
 
+        d.render(true);
+
+        // place next to anchor if present
+        setTimeout(() => positionGMDialog(d), 0);
         return;
       }
 
-      // Player receives result -> apply to their open RollDialog
-      if (msg.type === "coma-mirror-result" && msg.toUserId === game.user.id) {
+      /* -------------------------- PLAYER: APPLY ARTIFACT RESULT -------------------------- */
+      if (msg.type === "coma-approval-artifacts-result" && msg.toUserId === game.user.id) {
         const app = globalThis._comaOpenRollDialogs.get(msg.requestId);
         if (!app) return;
 
         const $root = app?.element ? (app.element.jquery ? app.element : $(app.element)) : null;
         if (!$root?.length) return;
 
+        // Apply to artifact approval panel (our injected checkboxes)
         const $panel = $root.find(".com-artifacts-roll");
-        if (!$panel.length) return;
+        if ($panel.length) {
+          const inputs = $panel.find("input.com-approve").toArray();
+          for (const t of (msg.toggles ?? [])) {
+            const el = inputs[Number(t.idx)];
+            if (!el) continue;
+            const changed = el.checked !== !!t.checked;
+            el.checked = !!t.checked;
+            if (changed) el.dispatchEvent(new Event("change", { bubbles: true }));
+          }
 
-        const inputs = $panel.find("input.com-approve").toArray();
+          // Add weakness for artifacts where GM checked it
+          const addWeak = Array.isArray(msg.addWeaknessFor) ? msg.addWeaknessFor : [];
+          if (addWeak.length) {
+            // For each artifact idx, find the corresponding weakness checkbox in our panel and check it
+            // (We tag weakness entries by data-kind + data-artifact-idx)
+            for (const aIdx of addWeak) {
+              const $w = $panel.find(`input.com-approve[data-kind="artifact-weakness"][data-artifact-idx="${Number(aIdx)}"]`).first();
+              if ($w.length && !$w[0].checked) {
+                $w[0].checked = true;
+                $w[0].dispatchEvent(new Event("change", { bubbles: true }));
+              }
+            }
+          }
+        }
+
+        app._comaArtifactsApproved = true;
+        tryUnlockPlayerConfirm(app);
+        return;
+      }
+
+      /* --------------------------- PLAYER: APPLY NORMAL RESULT -------------------------- */
+      if (msg.type === "coma-approval-normal-result" && msg.toUserId === game.user.id) {
+        const app = globalThis._comaOpenRollDialogs.get(msg.requestId);
+        if (!app) return;
+
+        const $root = app?.element ? (app.element.jquery ? app.element : $(app.element)) : null;
+        if (!$root?.length) return;
+
+        // Apply to normal tag checkboxes we discovered (stored on app)
+        const list = Array.isArray(app._comaNormalInputs) ? app._comaNormalInputs : [];
         for (const t of (msg.toggles ?? [])) {
-          const el = inputs[Number(t.idx)];
+          const el = list[Number(t.idx)];
           if (!el) continue;
           const changed = el.checked !== !!t.checked;
           el.checked = !!t.checked;
           if (changed) el.dispatchEvent(new Event("change", { bubbles: true }));
         }
 
-        if (typeof app._comArtifactsRecompute === "function") {
-          try { app._comArtifactsRecompute(); } catch (_) {}
-        }
+        app._comaNormalApproved = true;
+        tryUnlockPlayerConfirm(app);
+        return;
       }
     } catch (e) {
       console.warn(`${MODULE_ID} | socket handler error`, e);
@@ -167,8 +338,7 @@ function clearSelAndUnhighlight(actorId) {
 
     if (sheet?.rendered && sheet?.element) {
       const $el = sheet.element.jquery ? sheet.element : $(sheet.element);
-      $el.find(".com-tag-pill.com-picked").removeClass("com-picked");
-      $el.find(".com-tag-pick.com-picked").removeClass("com-picked");
+      $el.find(".com-tag-pill.com-picked, .com-tag-pick.com-picked").removeClass("com-picked");
     }
   } catch (e) {
     console.warn(`${MODULE_ID} | clearSelAndUnhighlight failed`, e);
@@ -219,7 +389,7 @@ function forceActivateTab(app, tab) {
 }
 
 /* =====================================================================================
- * LOCK DETECTION
+ * LOCK DETECTION (for your artifacts tab UI)
  * ===================================================================================== */
 function isSheetUnlocked(html) {
   const ref = html
@@ -231,7 +401,9 @@ function isSheetUnlocked(html) {
 }
 
 /* =====================================================================================
- * SHEET UI: ARTIFACTS TAB (NO REFRESH when entering edit; only save on exit)
+ * SHEET UI: ARTIFACTS TAB (your existing “stable” UI)
+ * NOTE: If your current working UI differs, keep yours. This is here only so this file
+ * remains all-in-one pasteable.
  * ===================================================================================== */
 function ensureArtifactsTab(app, html, actor) {
   if (!actor?.testUserPermission(game.user, "OWNER")) return;
@@ -243,7 +415,6 @@ function ensureArtifactsTab(app, html, actor) {
       .com-artifacts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
       .com-artifact { border: 1px solid var(--color-border-light-primary); border-radius: 10px; padding: 12px; box-sizing: border-box; }
       .com-topbar { display:flex; justify-content:flex-end; margin-bottom:6px; }
-
       .com-edit-toggle{
         background: rgba(120, 80, 160, .12);
         border: 1px solid rgba(120, 80, 160, .55);
@@ -254,12 +425,11 @@ function ensureArtifactsTab(app, html, actor) {
         display:inline-flex;
         align-items:center;
         justify-content:center;
-        color: var(--color-text-hyperlink); /* keep purple-ish system hyperlink color */
+        color: var(--color-text-hyperlink);
       }
       .com-edit-toggle[disabled]{ opacity:.55; cursor:default; }
 
       .com-center { display:flex; flex-direction:column; align-items:center; gap:10px; }
-
       .com-name-display{
         font-size: 1.5em;
         font-weight: 600;
@@ -288,7 +458,6 @@ function ensureArtifactsTab(app, html, actor) {
       }
       .com-artifact-img.com-img-clickable{ cursor:pointer; }
       .com-artifact-img.com-img-disabled{ cursor:default; opacity:.85; }
-
       .com-artifact-img .com-img-ph{
         font-size: 42px;
         opacity: .85;
@@ -343,11 +512,6 @@ function ensureArtifactsTab(app, html, actor) {
       .com-edit-fields label{ font-size: 12px; opacity:.85; }
       .com-edit-fields input{ width: 100%; max-width: 100%; box-sizing:border-box; }
 
-      .com-edit-fields input:focus, .com-name-input:focus{
-        outline: none;
-        box-shadow: 0 0 0 2px rgba(120, 80, 160, .25);
-      }
-
       .com-artifact .hint { opacity: .8; font-size: 12px; margin-top: 10px; text-align:center; }
     `;
     document.head.appendChild(style);
@@ -371,17 +535,6 @@ function ensureArtifactsTab(app, html, actor) {
     `);
   }
 
-  // Optional: if they click the sheet lock button, we re-render so the edit buttons enable/disable correctly.
-  // (This is separate from your artifact edit toggle; it does not fire when you click the artifact edit toggle.)
-  try {
-    if (!app._comArtifactsLockHooked) {
-      app._comArtifactsLockHooked = true;
-      html.off("click.comArtifactsLock").on("click.comArtifactsLock", "a.sheet-lock-button", () => {
-        setTimeout(() => { try { app.render(false); } catch (_) {} }, 0);
-      });
-    }
-  } catch (_) {}
-
   (async () => {
     const artifacts = await getArtifacts(actor);
     const grid = body.find(`.tab[data-tab="${MODULE_ID}"] .com-artifacts-grid`);
@@ -390,7 +543,7 @@ function ensureArtifactsTab(app, html, actor) {
     const pill = (key, txt, isWeak, iconClass) => `
       <div class="com-tag-pill ${isWeak ? "com-weak" : ""}" data-pick="${key}">
         <i class="fas ${iconClass}"></i>
-        <span class="com-pill-text">${Handlebars.escapeExpression(txt)}</span>
+        <span class="com-pill-text">${esc(txt)}</span>
       </div>
     `;
 
@@ -413,11 +566,11 @@ function ensureArtifactsTab(app, html, actor) {
 
           <div class="com-center">
             <div class="com-view-only">
-              <div class="com-name-display com-name-text">${Handlebars.escapeExpression(nameDisplay)}</div>
+              <div class="com-name-display com-name-text">${esc(nameDisplay)}</div>
             </div>
 
             <div class="com-edit-only">
-              <input class="com-name-input" type="text" data-field="name" value="${Handlebars.escapeExpression(a.name ?? "")}">
+              <input class="com-name-input" type="text" data-field="name" value="${esc(a.name ?? "")}">
             </div>
 
             <div class="com-artifact-img com-img-disabled" data-action="pick-image" ${imgStyle}>
@@ -436,9 +589,9 @@ function ensureArtifactsTab(app, html, actor) {
               <div class="com-edit-only com-power-edit">
                 <div class="com-edit-fields">
                   <label>Power Tag 1</label>
-                  <input type="text" data-field="power.0.name" value="${Handlebars.escapeExpression(p0)}">
+                  <input type="text" data-field="power.0.name" value="${esc(p0)}">
                   <label>Power Tag 2</label>
-                  <input type="text" data-field="power.1.name" value="${Handlebars.escapeExpression(p1)}">
+                  <input type="text" data-field="power.1.name" value="${esc(p1)}">
                 </div>
               </div>
             </div>
@@ -453,7 +606,7 @@ function ensureArtifactsTab(app, html, actor) {
               <div class="com-edit-only com-weak-edit">
                 <div class="com-edit-fields">
                   <label>Weakness Tag</label>
-                  <input type="text" data-field="weakness.name" value="${Handlebars.escapeExpression(w)}">
+                  <input type="text" data-field="weakness.name" value="${esc(w)}">
                 </div>
               </div>
             </div>
@@ -489,7 +642,6 @@ function ensureArtifactsTab(app, html, actor) {
       $hint.text(on ? "Editing: update fields and click the lock again to save." : "Click tags to select/deselect.");
     }
 
-    // Ensure all cards start NOT editing (no refresh needed, just DOM state)
     grid.find(".com-artifact").each((_, el) => setCardEditing($(el), false));
 
     // View mode: click to select/deselect (blocked in edit mode)
@@ -502,9 +654,7 @@ function ensureArtifactsTab(app, html, actor) {
       $(ev.currentTarget).toggleClass("com-picked", set.has(key));
     });
 
-    // Edit toggle:
-    // - First click: enter edit mode, NO sheet refresh.
-    // - Second click: save + update view DOM, still NO sheet refresh.
+    // Edit toggle (no actor sheet refresh)
     grid.off("click.comArtifactsToggle").on("click.comArtifactsToggle", ".com-edit-toggle", async (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
@@ -538,7 +688,7 @@ function ensureArtifactsTab(app, html, actor) {
 
       await setArtifacts(actor, artifacts2);
 
-      // Update view DOM in-place (no actor sheet refresh)
+      // Update view DOM
       const dispName = (name ?? "").trim() || `Artifact ${idx + 1}`;
       $sec.find(".com-name-text").text(dispName);
 
@@ -556,7 +706,7 @@ function ensureArtifactsTab(app, html, actor) {
       if (ww) $wView.append($(pill(`a${idx}.w`, ww, true, "fa-angle-double-down")));
       else $wView.append($(`<div style="opacity:.6; text-align:center; font-size:12px;">(empty)</div>`));
 
-      // Re-apply selection highlight to any newly re-rendered pills inside this section
+      // Re-apply selection highlight
       const s = getSel(actor.id);
       $sec.find(".com-tag-pill").each((_, el2) => {
         const key = el2.dataset.pick;
@@ -567,7 +717,7 @@ function ensureArtifactsTab(app, html, actor) {
       forceActivateTab(app, app._comLastTab || MODULE_ID);
     });
 
-    // Image pick only in edit mode + sheet unlocked (still no refresh)
+    // Image pick only in edit mode + sheet unlocked
     grid.off("click.comArtifactsImg").on("click.comArtifactsImg", ".com-artifact-img[data-action='pick-image']", async (ev) => {
       const $sec = $(ev.currentTarget).closest(".com-artifact");
       const idx = Number($sec.data("idx"));
@@ -584,7 +734,6 @@ function ensureArtifactsTab(app, html, actor) {
           artifacts2[idx].img = path;
           await setArtifacts(actor, artifacts2);
 
-          // Update image in-place (no refresh)
           const $img = $sec.find(".com-artifact-img").first();
           $img.css("background-image", path ? `url('${String(path).replace(/'/g, "%27")}')` : "");
           if (path) $img.find(".com-img-ph").remove();
@@ -608,15 +757,16 @@ Hooks.on("renderActorSheet", (app, html) => {
 
     ensureArtifactsTab(app, $html, actor);
     forceActivateTab(app, app._comLastTab);
-
   } catch (e) {
     console.error(`${MODULE_ID} | renderActorSheet failed`, e);
   }
 });
 
 /* =====================================================================================
- * ROLLDIALOG INJECTION + DESELECT ON CONFIRM (DEFERRED + ON CLOSE)
+ * ROLLDIALOG: INJECT ARTIFACT PANEL + GM-APPROVAL BLOCK OVER CONFIRM
  * ===================================================================================== */
+
+/** Find Custom Modifier input in CoM roll dialog (best effort) */
 function findCustomModifierInput($root) {
   // Prefer label match
   const labels = $root.find("label").toArray();
@@ -633,17 +783,150 @@ function findCustomModifierInput($root) {
   return $cand.length ? $cand : null;
 }
 
-function buildSelectedEntries(artifacts, selSet) {
+/** Build artifact entries from your selection */
+function buildSelectedArtifactEntries(artifacts, selSet) {
   const out = [];
   for (let a = 0; a < 2; a++) {
     const art = artifacts[a];
-    if (selSet.has(`a${a}.p0`) && (art.power?.[0]?.name ?? "").trim()) out.push({ label: art.power[0].name, mod: +1 });
-    if (selSet.has(`a${a}.p1`) && (art.power?.[1]?.name ?? "").trim()) out.push({ label: art.power[1].name, mod: +1 });
-    if (selSet.has(`a${a}.w`) && (art.weakness?.name ?? "").trim()) out.push({ label: art.weakness.name, mod: -1 });
+    const p0 = (art.power?.[0]?.name ?? "").trim();
+    const p1 = (art.power?.[1]?.name ?? "").trim();
+    const w  = (art.weakness?.name ?? "").trim();
+
+    if (selSet.has(`a${a}.p0`) && p0) out.push({ label: p0, mod: +1, kind: "artifact-power", artifactIdx: a });
+    if (selSet.has(`a${a}.p1`) && p1) out.push({ label: p1, mod: +1, kind: "artifact-power", artifactIdx: a });
+    if (selSet.has(`a${a}.w`)  && w)  out.push({ label: w,  mod: -1, kind: "artifact-weakness", artifactIdx: a });
   }
   return out;
 }
 
+/**
+ * Discover "normal" tag checkboxes in the RollDialog (heuristic).
+ * We look for checked checkboxes not belonging to our artifacts panel.
+ * This is best-effort because CoM implementations vary.
+ */
+function discoverNormalTagInputs($root) {
+  const $form = $root.find("form").first();
+  const $scope = $form.length ? $form : $root;
+
+  const all = $scope.find('input[type="checkbox"]').toArray();
+
+  // Exclude our own injected ones
+  const filtered = all.filter(el => {
+    const $el = $(el);
+    if ($el.hasClass("com-approve")) return false;
+    if ($el.closest(".com-artifacts-roll").length) return false;
+    // ignore hidden/offscreen
+    if (el.offsetParent === null) return false;
+    return true;
+  });
+
+  // Keep only checked ones as "selected tags"
+  const checked = filtered.filter(el => !!el.checked);
+
+  // Attempt label extraction
+  const entries = checked.map((el, idx) => {
+    let label = "";
+    const $el = $(el);
+    const $lbl = $el.closest("label");
+    if ($lbl.length) label = ($lbl.text() ?? "").trim();
+    if (!label) {
+      // sibling text
+      label = ($el.parent().text() ?? "").trim();
+    }
+    label = label.replace(/\s+/g, " ").trim();
+
+    // Mod guess: if label contains "weak" -> -1 else +1 (you can refine later)
+    const mod = /weak/i.test(label) ? -1 : +1;
+
+    return { idx, el, label: label || "Tag", mod, checked: true };
+  });
+
+  return { inputs: checked, entries };
+}
+
+/* ----------------------------- Player confirm-block overlay ---------------------------- */
+function ensureConfirmBlocker($root, on, reasonText) {
+  try {
+    const $dlg = $root.closest(".app");
+    if (!$dlg.length) return;
+
+    // Prefer overlay on dialog buttons area if found, else overlay whole form
+    const $btnRow = $root.find(".dialog-buttons").first();
+    const $mount = $btnRow.length ? $btnRow : $root.find("form").first();
+
+    const $m = $mount.length ? $mount : $root;
+    if (!$m.length) return;
+
+    $m.css("position", "relative");
+
+    const existing = $m.find(".coma-confirm-blocker").first();
+
+    if (!on) {
+      existing.remove();
+      // also re-enable dialog buttons if we disabled them
+      $root.find("button.dialog-button").prop("disabled", false);
+      return;
+    }
+
+    if (!existing.length) {
+      const blocker = $(`
+        <div class="coma-confirm-blocker"
+             style="
+               position:absolute;
+               inset:0;
+               z-index:1000;
+               background: rgba(120,120,120,.38);
+               border-radius: 6px;
+               display:flex;
+               align-items:center;
+               justify-content:center;
+               pointer-events:auto;
+               user-select:none;
+             ">
+          <div style="
+            padding:6px 10px;
+            background: rgba(0,0,0,.35);
+            border: 1px solid rgba(255,255,255,.18);
+            border-radius: 8px;
+            color: #fff;
+            font-size: 12px;
+            text-align:center;
+            max-width: 90%;
+          ">
+            ${esc(reasonText ?? "Waiting for GM approval…")}
+          </div>
+        </div>
+      `);
+      $m.append(blocker);
+      // optional: disable buttons as well (belt & suspenders)
+      $root.find("button.dialog-button").prop("disabled", true);
+    } else {
+      existing.find("div").first().html(esc(reasonText ?? "Waiting for GM approval…"));
+    }
+  } catch (e) {
+    console.warn(`${MODULE_ID} | ensureConfirmBlocker failed`, e);
+  }
+}
+
+function tryUnlockPlayerConfirm(app) {
+  try {
+    const needA = !!app._comaNeedArtifacts;
+    const needN = !!app._comaNeedNormal;
+
+    const okA = !needA || !!app._comaArtifactsApproved;
+    const okN = !needN || !!app._comaNormalApproved;
+
+    if (okA && okN) {
+      const $root = app?.element ? (app.element.jquery ? app.element : $(app.element)) : null;
+      if ($root?.length) ensureConfirmBlocker($root, false);
+    } else {
+      const $root = app?.element ? (app.element.jquery ? app.element : $(app.element)) : null;
+      if ($root?.length) ensureConfirmBlocker($root, true, "Waiting for GM approval…");
+    }
+  } catch (_) {}
+}
+
+/* ----------------------------- RollDialog injection + approval ---------------------------- */
 Hooks.on("renderRollDialog", async (app, html) => {
   try {
     const $root =
@@ -660,84 +943,185 @@ Hooks.on("renderRollDialog", async (app, html) => {
       game.user.character;
     if (!actor) return;
 
-    // Avoid double-inject
-    if ($root.find(".com-artifacts-roll").length) return;
+    // Avoid double-inject artifacts panel
+    if ($root.find(".com-artifacts-roll").length === 0) {
+      const $modInput = findCustomModifierInput($root);
+      if ($modInput && $modInput.length) {
+        if (!Number.isFinite(app._comArtifactsBaseMod)) {
+          const base = Number($modInput.val() ?? 0);
+          app._comArtifactsBaseMod = Number.isFinite(base) ? base : 0;
+        }
 
-    const $modInput = findCustomModifierInput($root);
-    if (!$modInput || !$modInput.length) return;
+        const artifacts = await getArtifacts(actor);
+        const sel = getSel(actor.id);
+        const entries = buildSelectedArtifactEntries(artifacts, sel);
 
-    // Base mod per dialog instance
-    if (!Number.isFinite(app._comArtifactsBaseMod)) {
-      const base = Number($modInput.val() ?? 0);
-      app._comArtifactsBaseMod = Number.isFinite(base) ? base : 0;
+        const $form = $root.find("form").first();
+        const $mount = $form.length ? $form : $root;
+
+        const $panel = $(`
+          <fieldset class="com-artifacts-roll" style="margin-top:10px; padding:8px; border:1px solid var(--color-border-light-primary); border-radius:6px;">
+            <legend>Artifacts</legend>
+            <div class="com-artifacts-approve" style="display:flex; flex-direction:column; gap:6px;">
+              ${
+                entries.length
+                  ? entries.map((e, idx) => `
+                    <label style="display:flex; align-items:center; gap:8px;">
+                      <input type="checkbox"
+                             class="com-approve"
+                             data-kind="${esc(e.kind)}"
+                             data-artifact-idx="${Number.isFinite(e.artifactIdx) ? Number(e.artifactIdx) : ""}"
+                             data-mod="${e.mod}"
+                             checked />
+                      <span>${esc(e.label)}</span>
+                      <span style="margin-left:auto; opacity:.8;">${e.mod > 0 ? "+1" : "-1"}</span>
+                    </label>
+                  `).join("")
+                  : `<div style="opacity:.8;">No highlighted artifact tags.</div>`
+              }
+            </div>
+            <div class="form-group" style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
+              <span>Artifact modifier:</span>
+              <strong class="com-artifacts-mod">+0</strong>
+            </div>
+          </fieldset>
+        `);
+
+        $mount.append($panel);
+
+        function recomputeAndApply() {
+          let mod = 0;
+          $panel.find("input.com-approve:checked").each((_, el) => {
+            mod += Number(el.dataset.mod ?? 0);
+          });
+
+          $panel.find(".com-artifacts-mod").text(`${mod >= 0 ? "+" : ""}${mod}`);
+
+          $modInput.val((app._comArtifactsBaseMod ?? 0) + mod);
+          $modInput.trigger("input");
+          $modInput.trigger("change");
+        }
+
+        app._comArtifactsRecompute = recomputeAndApply;
+        recomputeAndApply();
+        $panel.on("change", "input.com-approve", recomputeAndApply);
+      }
     }
 
+    // GM does not need approval gating from themselves
+    if (game.user.isGM) return;
+
+    // Establish requestId + register app in map
+    if (!app._comaRequestId) app._comaRequestId = foundry.utils.randomID();
+    globalThis._comaOpenRollDialogs.set(app._comaRequestId, app);
+
+    // Determine needs: artifacts selected?
     const artifacts = await getArtifacts(actor);
     const sel = getSel(actor.id);
-    const entries = buildSelectedEntries(artifacts, sel);
+    const artifactEntries = buildSelectedArtifactEntries(artifacts, sel)
+      .map((e, idx) => ({ idx, label: e.label, mod: e.mod, checked: true, kind: e.kind, artifactIdx: e.artifactIdx }));
 
-    const $form = $root.find("form").first();
-    const $mount = $form.length ? $form : $root;
+    // Determine needs: normal tags selected in dialog (best-effort)
+    const normalFound = discoverNormalTagInputs($root);
+    app._comaNormalInputs = normalFound.inputs;
+    const normalEntries = normalFound.entries
+      .filter(e => (e.label ?? "").trim())
+      .map((e, idx) => ({ idx, label: e.label, mod: e.mod, checked: true }));
 
-    const $panel = $(`
-      <fieldset class="com-artifacts-roll" style="margin-top:10px; padding:8px; border:1px solid var(--color-border-light-primary); border-radius:6px;">
-        <legend>Artifacts</legend>
-        <div class="com-artifacts-approve" style="display:flex; flex-direction:column; gap:6px;">
-          ${
-            entries.length
-              ? entries.map(e => `
-                <label style="display:flex; align-items:center; gap:8px;">
-                  <input type="checkbox" class="com-approve" data-mod="${e.mod}" checked />
-                  <span>${Handlebars.escapeExpression(e.label)}</span>
-                  <span style="margin-left:auto; opacity:.8;">${e.mod > 0 ? "+1" : "-1"}</span>
-                </label>
-              `).join("")
-              : `<div style="opacity:.8;">No highlighted artifact tags.</div>`
+    app._comaNeedArtifacts = artifactEntries.length > 0;
+    app._comaNeedNormal = normalEntries.length > 0;
+
+    // If nothing selected, do not block
+    if (!app._comaNeedArtifacts && !app._comaNeedNormal) {
+      ensureConfirmBlocker($root, false);
+      return;
+    }
+
+    // Block confirm until GM approves
+    app._comaArtifactsApproved = !app._comaNeedArtifacts;
+    app._comaNormalApproved = !app._comaNeedNormal;
+    ensureConfirmBlocker($root, true, "Waiting for GM approval…");
+
+    // Send requests only once per dialog render cycle
+    if (!app._comaSentApprovalRequests) {
+      app._comaSentApprovalRequests = true;
+
+      // ARTIFACT REQUEST
+      if (app._comaNeedArtifacts) {
+        const artifactsMeta = [
+          { artifactIdx: 0, weaknessLabel: (artifacts[0]?.weakness?.name ?? "").trim() },
+          { artifactIdx: 1, weaknessLabel: (artifacts[1]?.weakness?.name ?? "").trim() }
+        ];
+
+        game.socket.emit(COMA_SOCKET, {
+          type: "coma-approval-artifacts-request",
+          requestId: app._comaRequestId,
+          fromUserId: game.user.id,
+          fromUserName: game.user.name,
+          actorId: actor.id,
+          actorName: actor.name,
+          entries: artifactEntries,
+          artifactsMeta
+        });
+      }
+
+      // NORMAL REQUEST
+      if (app._comaNeedNormal) {
+        game.socket.emit(COMA_SOCKET, {
+          type: "coma-approval-normal-request",
+          requestId: app._comaRequestId,
+          fromUserId: game.user.id,
+          fromUserName: game.user.name,
+          actorId: actor.id,
+          actorName: actor.name,
+          entries: normalEntries
+        });
+      }
+
+      // Safety timeout: if GM never answers, unblock after 60s (prevents permanent soft-lock)
+      setTimeout(() => {
+        try {
+          const $r = app?.element ? (app.element.jquery ? app.element : $(app.element)) : null;
+          if (!$r?.length) return;
+          // Only unblock if still pending
+          const needA = !!app._comaNeedArtifacts;
+          const needN = !!app._comaNeedNormal;
+          const okA = !needA || !!app._comaArtifactsApproved;
+          const okN = !needN || !!app._comaNormalApproved;
+          if (!(okA && okN)) {
+            ui.notifications?.warn?.("GM approval timeout. Unblocking roll.");
+            app._comaArtifactsApproved = true;
+            app._comaNormalApproved = true;
+            ensureConfirmBlocker($r, false);
           }
-        </div>
-        <div class="form-group" style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
-          <span>Artifact modifier:</span>
-          <strong class="com-artifacts-mod">+0</strong>
-        </div>
-      </fieldset>
-    `);
-
-    $mount.append($panel);
-
-    function recomputeAndApply() {
-      let mod = 0;
-      $panel.find("input.com-approve:checked").each((_, el) => {
-        mod += Number(el.dataset.mod ?? 0);
-      });
-
-      $panel.find(".com-artifacts-mod").text(`${mod >= 0 ? "+" : ""}${mod}`);
-
-      $modInput.val((app._comArtifactsBaseMod ?? 0) + mod);
-      $modInput.trigger("input");
-      $modInput.trigger("change");
+        } catch (_) {}
+      }, 60000);
     }
+  } catch (e) {
+    console.error(`${MODULE_ID} | renderRollDialog approval hook failed`, e);
+  }
+});
 
-    app._comArtifactsRecompute = recomputeAndApply;
-    recomputeAndApply();
-    $panel.on("change", "input.com-approve", recomputeAndApply);
+/* =====================================================================================
+ * CLEAR ARTIFACT SELECTION AFTER CONFIRM (DEFERRED + ON CLOSE)
+ * (keeps your existing behavior)
+ * ===================================================================================== */
+Hooks.on("renderRollDialog", async (app, html) => {
+  try {
+    const $root =
+      html?.jquery ? html :
+      html ? $(html) :
+      app?.element ? (app.element.jquery ? app.element : $(app.element)) :
+      null;
+    if (!$root || !$root.length) return;
 
-    // Player -> GM mirror request
-    if (!game.user.isGM) {
-      if (!app._comaRequestId) app._comaRequestId = foundry.utils.randomID();
-      globalThis._comaOpenRollDialogs.set(app._comaRequestId, app);
+    const actor =
+      app.actor ??
+      app.options?.actor ??
+      (app.options?.actorId ? game.actors.get(app.options.actorId) : null) ??
+      game.user.character;
+    if (!actor) return;
 
-      game.socket.emit(COMA_SOCKET, {
-        type: "coma-mirror-request",
-        requestId: app._comaRequestId,
-        fromUserId: game.user.id,
-        fromUserName: game.user.name,
-        actorId: actor.id,
-        actorName: actor.name,
-        entries: entries.map((e, idx) => ({ idx, label: e.label, mod: e.mod, checked: true }))
-      });
-    }
-
-    // ===== CLEAR ARTIFACT SELECTION AFTER CONFIRM (DEFERRED + CLOSE-SAFE) =====
     app._comArtifactsActorId = actor.id;
     app._comArtifactsConfirmed = false;
 
@@ -750,31 +1134,22 @@ Hooks.on("renderRollDialog", async (app, html) => {
       $confirmBtn.off("click.comArtifactsClearOnConfirm").on("click.comArtifactsClearOnConfirm", () => {
         app._comArtifactsConfirmed = true;
 
-        setTimeout(() => {
-          try { clearSelAndUnhighlight(actor.id); } catch (_) {}
-        }, 0);
-
-        setTimeout(() => {
-          try { clearSelAndUnhighlight(actor.id); } catch (_) {}
-        }, 250);
+        setTimeout(() => { try { clearSelAndUnhighlight(actor.id); } catch (_) {} }, 0);
+        setTimeout(() => { try { clearSelAndUnhighlight(actor.id); } catch (_) {} }, 250);
       });
     }
-    // ========================================================================
-
   } catch (e) {
-    console.error(`${MODULE_ID} | renderRollDialog failed`, e);
+    console.error(`${MODULE_ID} | renderRollDialog clear-on-confirm failed`, e);
   }
 });
 
 /* =====================================================================================
- * CLEANUP + FINAL CLEAR ON DIALOG CLOSE (only if confirmed)
+ * CLEANUP
  * ===================================================================================== */
 Hooks.on("closeApplication", (app) => {
   try {
-    // GM mirror cleanup map
     if (app?._comaRequestId) globalThis._comaOpenRollDialogs.delete(app._comaRequestId);
 
-    // If this was a RollDialog and player confirmed, clear again (final guarantee)
     if (app?._comArtifactsConfirmed && app?._comArtifactsActorId) {
       try { clearSelAndUnhighlight(app._comArtifactsActorId); } catch (_) {}
     }
