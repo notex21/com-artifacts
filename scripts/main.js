@@ -2,8 +2,6 @@ const MODULE_ID = "com-artifacts";
 
 /* =====================================================================================
  * GM MIRROR (DEBUG-PROOF)
- * Player renderRollDialog -> emits socket ALWAYS
- * GM receives -> opens a dialog ALWAYS
  * ===================================================================================== */
 const COMA_SOCKET = `module.${MODULE_ID}`;
 
@@ -17,11 +15,9 @@ function comaLog(...a) {
 Hooks.once("ready", () => {
   comaLog("READY on", game.user?.name, "GM?", game.user?.isGM);
 
-  // Register socket listener on every client that loads this module
   game.socket.on(COMA_SOCKET, (msg) => {
     if (!msg?.type) return;
 
-    // GM receives mirror request
     if (msg.type === "coma-mirror-request" && game.user.isGM) {
       comaLog("GM received mirror request", msg);
 
@@ -46,7 +42,7 @@ Hooks.once("ready", () => {
                     <span style="margin-left:auto; opacity:.8;">${Number(e.mod) > 0 ? "+1" : "-1"}</span>
                   </label>
                 `).join("")
-                : `<div style="opacity:.8;">No entries were sent (this is still a PASS for socket visibility).</div>`
+                : `<div style="opacity:.8;">No entries were sent.</div>`
             }
           </div>
         </div>
@@ -83,7 +79,6 @@ Hooks.once("ready", () => {
       return;
     }
 
-    // Player receives result and applies to their open RollDialog UI
     if (msg.type === "coma-mirror-result" && msg.toUserId === game.user.id) {
       comaLog("Player received mirror result", msg);
 
@@ -110,7 +105,6 @@ Hooks.once("ready", () => {
       if (typeof app._comArtifactsRecompute === "function") {
         try { app._comArtifactsRecompute(); } catch (_) {}
       }
-
       return;
     }
   });
@@ -163,6 +157,27 @@ function toggleSel(actorId, key) {
 function clearSel(actorId) {
   globalThis.comArtifactsSelection.delete(actorId);
   scheduleSaveSelection(actorId);
+}
+
+/**
+ * CLEAR + IMMEDIATE UI UPDATE
+ * This removes the yellow highlight on the sheet instantly.
+ */
+function clearSelAndUnhighlight(actorId) {
+  try {
+    clearSel(actorId);
+
+    const actor = game.actors.get(actorId);
+    const sheet = actor?.sheet;
+
+    // remove yellow highlight immediately
+    if (sheet?.rendered && sheet?.element) {
+      const $el = sheet.element.jquery ? sheet.element : $(sheet.element);
+      $el.find(".com-tag-pick.com-picked").removeClass("com-picked");
+    }
+  } catch (e) {
+    console.warn(`${MODULE_ID} | clearSelAndUnhighlight failed`, e);
+  }
 }
 
 /* -------------------- Storage -------------------- */
@@ -641,7 +656,7 @@ Hooks.on("renderRollDialog", async (app, html) => {
       game.user.character;
     if (!actor) return;
 
-    // === NEW: mark dialog so we can clear selection after roll
+    // Mark this dialog instance
     app._comActorId = actor.id;
     app._comIsRollDialog = true;
 
@@ -694,40 +709,37 @@ Hooks.on("renderRollDialog", async (app, html) => {
       $modInput.val((app._comArtifactsBaseMod ?? 0) + mod);
       $modInput.trigger("input");
       $modInput.trigger("change");
-
-      // === NEW: build artifact summary for chat relabel
-      try {
-        const parts = [];
-        $panel.find("label").each((_, lab) => {
-          const $lab = $(lab);
-          const $cb = $lab.find("input.com-approve");
-          if (!$cb.length) return;
-          if (!$cb.prop("checked")) return;
-
-          const label = ($lab.find("span").first().text() ?? "").trim();
-          const m = Number($cb.attr("data-mod") ?? 0);
-          if (!label) return;
-          parts.push(`${label} (${m >= 0 ? "+" : ""}${m})`);
-        });
-
-        const summary = parts.length ? `Artifacts: ${parts.join(", ")}` : "Artifacts";
-        app._comArtifactChatLabel = summary;
-
-        globalThis._comLastArtifactChatLabelByUser ??= {};
-        globalThis._comLastArtifactChatLabelByUser[game.user.id] = { summary, ts: Date.now() };
-      } catch (_) {}
     }
 
     app._comArtifactsRecompute = recomputeAndApply;
     recomputeAndApply();
     $panel.on("change", "input.com-approve", recomputeAndApply);
 
-    // IMPORTANT: emit to GM ALWAYS (even if entries empty) to prove socket visibility
+    // IMPORTANT: DESELECT RIGHT WHEN PLAYER PRESSES CONFIRM
+    // CoM sometimes doesn't submit the form, so we hook the button click by label/class/data-button.
+    $root.off("click.comArtifactsConfirm").on("click.comArtifactsConfirm", "button", (ev) => {
+      if (game.user.isGM) return;
+
+      const $btn = $(ev.currentTarget);
+      const label = ($btn.text() ?? "").trim().toLowerCase();
+      const dataBtn = ($btn.data("button") ?? "").toString().toLowerCase();
+
+      const isConfirm =
+        $btn.hasClass("confirm") ||
+        dataBtn === "confirm" ||
+        label === "confirm" ||
+        label.includes("confirm");
+
+      if (!isConfirm) return;
+
+      // Clear selection + remove yellow highlight immediately
+      clearSelAndUnhighlight(actor.id);
+    });
+
+    // Keep your mirror emit (unchanged)
     if (!game.user.isGM) {
       if (!app._comaRequestId) app._comaRequestId = foundry.utils.randomID();
       globalThis._comaOpenRollDialogs.set(app._comaRequestId, app);
-
-      comaLog("Player emitting mirror request", { requestId: app._comaRequestId, entries: entries.length });
 
       game.socket.emit(COMA_SOCKET, {
         type: "coma-mirror-request",
@@ -740,53 +752,22 @@ Hooks.on("renderRollDialog", async (app, html) => {
       });
     }
 
-    $mount.off("submit.comArtifacts").on("submit.comArtifacts", () => {
-      // Keep this (optional): clears after submit as well
-      clearSel(actor.id);
-    });
-
   } catch (e) {
     console.error("com-artifacts | renderRollDialog failed", e);
   }
 });
 
-/* =====================================================================================
- * NEW: clear artifact selections after the roll dialog closes (after approval/roll)
- * ===================================================================================== */
+/* -------------------- Cleanup -------------------- */
 Hooks.on("closeApplication", (app) => {
   // cleanup player map
   if (app?._comaRequestId) {
     globalThis._comaOpenRollDialogs.delete(app._comaRequestId);
   }
 
-  // Clear selection when the roll dialog closes (player-side)
+  // fallback: if dialog closes without our confirm click, still clear
   try {
     if (app?._comIsRollDialog && app?._comActorId && !game.user.isGM) {
-      clearSel(app._comActorId);
-    }
-  } catch (_) {}
-});
-
-/* =====================================================================================
- * NEW: Chat relabel - replace "Custom Modifier" with "Artifacts: ..."
- * ===================================================================================== */
-Hooks.on("preCreateChatMessage", (doc, data, options, userId) => {
-  try {
-    const authorId = data.user ?? userId;
-    if (authorId !== game.user.id) return;
-
-    const cache = globalThis._comLastArtifactChatLabelByUser?.[game.user.id];
-    if (!cache) return;
-
-    if ((Date.now() - (cache.ts ?? 0)) > 8000) return;
-
-    const content = data.content;
-    if (typeof content !== "string") return;
-
-    const replaced = content.replace(/Custom Modifier/gi, cache.summary);
-    if (replaced !== content) {
-      data.content = replaced;
-      delete globalThis._comLastArtifactChatLabelByUser[game.user.id];
+      clearSelAndUnhighlight(app._comActorId);
     }
   } catch (_) {}
 });
