@@ -1,4 +1,195 @@
 const MODULE_ID = "com-artifacts";
+// ================== GM Review Bridge (TagReviewDialog + fallback) ==================
+const COMA_SOCKET = `module.${MODULE_ID}`;
+
+// On GM: pending artifact reviews keyed by requestId
+globalThis._comaPendingArtifactReview ??= new Map();
+
+// On Player: open RollDialogs keyed by requestId so we can apply GM toggles
+globalThis._comaOpenRollDialogs ??= new Map();
+
+function comaSendArtifactReviewRequest({ requestId, actor, entries }) {
+  game.socket.emit(COMA_SOCKET, {
+    type: "coma-artifact-review-request",
+    requestId,
+    fromUserId: game.user.id,
+    fromUserName: game.user.name,
+    actorId: actor?.id,
+    actorName: actor?.name,
+    entries: entries.map((e, idx) => ({
+      idx,
+      label: e.label,
+      mod: e.mod,
+      checked: true
+    }))
+  });
+}
+
+function comaApplyArtifactTogglesToPlayerDialog(app, toggles) {
+  const $root =
+    app?.element ? (app.element.jquery ? app.element : $(app.element)) :
+    null;
+  if (!$root || !$root.length) return;
+
+  const $panel = $root.find(".com-artifacts-roll");
+  if (!$panel.length) return;
+
+  const inputs = $panel.find("input.com-approve").toArray();
+  for (const t of (toggles ?? [])) {
+    const el = inputs[Number(t.idx)];
+    if (!el) continue;
+    const changed = el.checked !== !!t.checked;
+    el.checked = !!t.checked;
+    if (changed) el.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  if (typeof app._comArtifactsRecompute === "function") {
+    try { app._comArtifactsRecompute(); } catch (_) {}
+  }
+}
+
+function comaOpenFallbackArtifactReviewDialog(req) {
+  const { requestId, fromUserId, fromUserName, actorName, entries } = req;
+
+  const content = `
+    <form class="coma-artifacts-review">
+      <p><strong>Review Tags</strong> (Artifacts)</p>
+      <p style="opacity:.85;"><strong>Player:</strong> ${Handlebars.escapeExpression(fromUserName ?? "")} &nbsp; <strong>Actor:</strong> ${Handlebars.escapeExpression(actorName ?? "")}</p>
+      <hr/>
+      <div style="max-height: 360px; overflow:auto;">
+        ${
+          (entries?.length ?? 0)
+            ? entries.map(e => `
+              <div style="display:flex; gap:8px; align-items:center; margin:6px 0;">
+                <input type="checkbox" data-idx="${Number(e.idx)}" ${e.checked ? "checked" : ""}/>
+                <span>${Handlebars.escapeExpression(e.label ?? "")}</span>
+                <span style="margin-left:auto; opacity:.8;">${Number(e.mod) > 0 ? "+1" : "-1"}</span>
+              </div>
+            `).join("")
+            : `<div style="opacity:.8;">No artifact tags.</div>`
+        }
+      </div>
+    </form>
+  `;
+
+  new Dialog({
+    title: "Review Tags",
+    content,
+    buttons: {
+      confirm: {
+        label: "confirm",
+        callback: (html) => {
+          const el = html?.[0];
+          const checks = Array.from(el.querySelectorAll('input[type="checkbox"][data-idx]'));
+          const toggles = (entries ?? []).map(e => {
+            const idx = Number(e.idx);
+            const c = checks.find(x => Number(x.getAttribute("data-idx")) === idx);
+            return { ...e, checked: c ? c.checked : !!e.checked };
+          });
+
+          game.socket.emit(COMA_SOCKET, {
+            type: "coma-artifact-review-result",
+            requestId,
+            toUserId: fromUserId,
+            toggles
+          });
+        }
+      },
+      close: { label: "Close" }
+    },
+    default: "confirm"
+  }).render(true);
+}
+
+Hooks.once("ready", () => {
+  game.socket.on(COMA_SOCKET, (msg) => {
+    if (!msg?.type) return;
+
+    // GM receives artifact review request
+    if (msg.type === "coma-artifact-review-request" && game.user.isGM) {
+      globalThis._comaPendingArtifactReview.set(msg.requestId, msg);
+
+      // If a TagReviewDialog is already open, we'll inject there in the render hook.
+      // If no TagReviewDialog opens (artifact-only), show fallback immediately.
+      // (If TagReview opens later, injection will still work; we also clear pending after injection.)
+      comaOpenFallbackArtifactReviewDialog({
+        requestId: msg.requestId,
+        fromUserId: msg.fromUserId,
+        fromUserName: msg.fromUserName,
+        actorName: msg.actorName,
+        entries: msg.entries
+      });
+      return;
+    }
+
+    // Player receives GM decision
+    if (msg.type === "coma-artifact-review-result" && msg.toUserId === game.user.id) {
+      const app = globalThis._comaOpenRollDialogs.get(msg.requestId);
+      if (app) comaApplyArtifactTogglesToPlayerDialog(app, msg.toggles);
+      return;
+    }
+  });
+});
+Hooks.on("renderTagReviewDialog", (app, html) => {
+  if (!game.user.isGM) return;
+
+  const $root = html?.jquery ? html : $(html);
+  if (!$root?.length) return;
+
+  // Prevent double injection
+  if ($root.find(".coma-artifacts-in-review").length) return;
+
+  // Grab the most recent pending request (good enough for normal flows)
+  // If you need perfect correlation later, we can key by actorId/fromUserId.
+  const pending = Array.from(globalThis._comaPendingArtifactReview.values()).pop();
+  if (!pending?.entries?.length) return;
+
+  const $panel = $(`
+    <div class="coma-artifacts-in-review" style="margin-top:10px; padding-top:8px; border-top:1px solid var(--color-border-light-primary);">
+      <div style="font-weight:600; margin-bottom:6px;">Artifacts</div>
+      <div style="display:flex; flex-direction:column; gap:6px;">
+        ${pending.entries.map(e => `
+          <label style="display:flex; align-items:center; gap:8px;">
+            <input type="checkbox" class="coma-art-review" data-idx="${Number(e.idx)}" ${e.checked ? "checked" : ""}/>
+            <span>${Handlebars.escapeExpression(e.label ?? "")}</span>
+            <span style="margin-left:auto; opacity:.8;">${Number(e.mod) > 0 ? "+1" : "-1"}</span>
+          </label>
+        `).join("")}
+      </div>
+    </div>
+  `);
+
+  // Insert into the dialog content; try common containers first
+  const $mount =
+    $root.find(".window-content").first().length ? $root.find(".window-content").first() :
+    $root;
+
+  $mount.append($panel);
+
+  // When GM clicks the dialog "confirm"/approve, we need to send the state back.
+  // We hook the confirm button click generically.
+  $root.off("click.comaArtifactsReview").on("click.comaArtifactsReview", "button", (ev) => {
+    const txt = ($(ev.currentTarget).text() ?? "").trim().toLowerCase();
+    if (!txt.includes("confirm") && !txt.includes("approve")) return;
+
+    const toggles = pending.entries.map(e => {
+      const idx = Number(e.idx);
+      const checked = !!$root.find(`input.coma-art-review[data-idx="${idx}"]`).prop("checked");
+      return { ...e, checked };
+    });
+
+    game.socket.emit(COMA_SOCKET, {
+      type: "coma-artifact-review-result",
+      requestId: pending.requestId,
+      toUserId: pending.fromUserId,
+      toggles
+    });
+
+    // Clear pending so we don't inject again
+    globalThis._comaPendingArtifactReview.delete(pending.requestId);
+  });
+});
+
 
 /* =====================================================================================
  * GM APPROVAL WINDOW FOR PLAYER'S ROLLDIALOG (socket-based)
@@ -757,6 +948,28 @@ Hooks.on("renderRollDialog", async (app, html) => {
     // Selection comes from THIS USER (persisted)
     const sel = getSel(actor.id);
     const entries = buildSelectedEntries(artifacts, sel);
+    // === GM review trigger for artifact tags ===
+// If the player selected any artifact tags, ask the GM to review them
+if (!game.user.isGM && entries.length) {
+  if (!app._comaMirrorRequestId) {
+    app._comaMirrorRequestId = foundry.utils.randomID();
+  }
+
+  // Track this RollDialog so GM decisions can update it
+  globalThis._comaOpenRollDialogs.set(app._comaMirrorRequestId, app);
+
+  // Make sure recompute is callable from socket updates
+  if (typeof app._comArtifactsRecompute !== "function") {
+    app._comArtifactsRecompute = () => {};
+  }
+
+  comaSendArtifactReviewRequest({
+    requestId: app._comaMirrorRequestId,
+    actor,
+    entries
+  });
+}
+
 
     const $form = $root.find("form").first();
     const $mount = $form.length ? $form : $root;
