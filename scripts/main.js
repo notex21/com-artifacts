@@ -1,14 +1,12 @@
 const MODULE_ID = "com-artifacts";
 
 /* =====================================================================================
- * SOCKET: GM MIRROR
+ * SOCKET: GM MIRROR (optional approval UI)
  * ===================================================================================== */
 const COMA_SOCKET = `module.${MODULE_ID}`;
 globalThis._comaOpenRollDialogs ??= new Map();
 
-function comaLog(...a) {
-  console.log(`${MODULE_ID} |`, ...a);
-}
+function comaLog(...a) { console.log(`${MODULE_ID} |`, ...a); }
 
 Hooks.once("ready", () => {
   comaLog("READY", { user: game.user?.name, isGM: game.user?.isGM });
@@ -17,7 +15,7 @@ Hooks.once("ready", () => {
     try {
       if (!msg?.type) return;
 
-      // GM receives mirror request -> show dialog
+      // GM receives request -> show mirror dialog
       if (msg.type === "coma-mirror-request" && game.user.isGM) {
         const entries = Array.isArray(msg.entries) ? msg.entries : [];
 
@@ -83,8 +81,7 @@ Hooks.once("ready", () => {
         const app = globalThis._comaOpenRollDialogs.get(msg.requestId);
         if (!app) return;
 
-        const $root =
-          app?.element ? (app.element.jquery ? app.element : $(app.element)) : null;
+        const $root = app?.element ? (app.element.jquery ? app.element : $(app.element)) : null;
         if (!$root?.length) return;
 
         const $panel = $root.find(".com-artifacts-roll");
@@ -217,9 +214,7 @@ function getActiveTab(html) {
 function forceActivateTab(app, tab) {
   const tabs = app?._tabs?.[0];
   if (!tabs || !tab) return;
-  setTimeout(() => {
-    try { tabs.activate(tab); } catch (_) {}
-  }, 0);
+  setTimeout(() => { try { tabs.activate(tab); } catch (_) {} }, 0);
 }
 
 /* =====================================================================================
@@ -230,9 +225,7 @@ function isSheetEditable(html) {
     .find(`.sheet-body .tab:not([data-tab="${MODULE_ID}"]) input, .sheet-body .tab:not([data-tab="${MODULE_ID}"]) textarea, .sheet-body .tab:not([data-tab="${MODULE_ID}"]) select`)
     .filter((_, el) => el.offsetParent !== null);
 
-  if (ref.length) {
-    return ref.toArray().some(el => !el.disabled);
-  }
+  if (ref.length) return ref.toArray().some(el => !el.disabled);
   return true;
 }
 
@@ -619,7 +612,7 @@ Hooks.on("renderActorSheet", (app, html) => {
 });
 
 /* =====================================================================================
- * ROLLDIALOG INJECTION
+ * ROLLDIALOG INJECTION + DESELECT ON CONFIRM (DEFERRED + ON CLOSE)
  * ===================================================================================== */
 function findCustomModifierInput($root) {
   // Prefer label match
@@ -650,26 +643,6 @@ function buildSelectedEntries(artifacts, selSet) {
 
 Hooks.on("renderRollDialog", async (app, html) => {
   try {
-        // ===== CLEAR ARTIFACT SELECTION ON CONFIRM (your requested behavior) =====
-    // When the player presses Confirm in the Make a Roll dialog,
-    // remove .com-picked from all artifact tags and clear the saved selection.
-    // (This matches: pic1 click => pic2 class removed => pic3 state.)
-    const $confirmBtn =
-      $root.find("button.dialog-button.one.default, button.dialog-button.default, button.dialog-button.one")
-        .filter((_, el) => ((el.textContent ?? "").trim().toLowerCase() === "confirm"))
-        .first();
-
-    if ($confirmBtn?.length) {
-      $confirmBtn.off("click.comArtifactsClearOnConfirm").on("click.comArtifactsClearOnConfirm", () => {
-        try {
-          clearSelAndUnhighlight(actor.id); // clears flags + removes yellow highlight on the open sheet
-        } catch (e) {
-          console.warn(`${MODULE_ID} | failed to clear on confirm`, e);
-        }
-      });
-    }
-    // =======================================================================
-
     const $root =
       html?.jquery ? html :
       html ? $(html) :
@@ -745,7 +718,7 @@ Hooks.on("renderRollDialog", async (app, html) => {
     recomputeAndApply();
     $panel.on("change", "input.com-approve", recomputeAndApply);
 
-    // Send mirror request to GM (player side only)
+    // Player -> GM mirror request
     if (!game.user.isGM) {
       if (!app._comaRequestId) app._comaRequestId = foundry.utils.randomID();
       globalThis._comaOpenRollDialogs.set(app._comaRequestId, app);
@@ -761,42 +734,49 @@ Hooks.on("renderRollDialog", async (app, html) => {
       });
     }
 
+    // ===== CLEAR ARTIFACT SELECTION AFTER CONFIRM (DEFERRED + CLOSE-SAFE) =====
+    // We must NOT clear synchronously on click, or CoM won't read the selection.
+    // So we mark "confirmed", then clear after CoM processes, and again when the dialog closes.
+    app._comArtifactsActorId = actor.id;
+    app._comArtifactsConfirmed = false;
+
+    const $confirmBtn =
+      $root.find("button.dialog-button")
+        .filter((_, el) => ((el.textContent ?? "").trim().toLowerCase() === "confirm"))
+        .first();
+
+    if ($confirmBtn?.length) {
+      $confirmBtn.off("click.comArtifactsClearOnConfirm").on("click.comArtifactsClearOnConfirm", () => {
+        app._comArtifactsConfirmed = true;
+
+        // Defer to next tick (and a short follow-up) to survive CoM re-render cycles.
+        setTimeout(() => {
+          try { clearSelAndUnhighlight(actor.id); } catch (_) {}
+        }, 0);
+
+        setTimeout(() => {
+          try { clearSelAndUnhighlight(actor.id); } catch (_) {}
+        }, 250);
+      });
+    }
+    // ========================================================================
+
   } catch (e) {
     console.error(`${MODULE_ID} | renderRollDialog failed`, e);
   }
 });
 
 /* =====================================================================================
- * DESELECT FIX (CORRECT): clear selection ONLY when the roll chat message is created
- * ===================================================================================== */
-Hooks.on("preCreateChatMessage", (doc, data, options, userId) => {
-  try {
-    // only the client that is creating the message (the rolling player)
-    if (userId !== game.user.id) return;
-
-    const speaker = data.speaker ?? doc.speaker;
-    const actorId = speaker?.actor;
-    if (!actorId) return;
-
-    // only clear if this actor currently has any artifact selection
-    const s = getSel(actorId);
-    if (!s || s.size === 0) return;
-
-    // CoM roll messages come with HTML content; we don't rely on exact strings,
-    // we just clear on "any message created by this user while selection is active".
-    clearSelAndUnhighlight(actorId);
-
-  } catch (e) {
-    console.warn(`${MODULE_ID} | preCreateChatMessage deselect failed`, e);
-  }
-});
-
-/* =====================================================================================
- * CLEANUP ONLY (no deselect here)
+ * CLEANUP + FINAL CLEAR ON DIALOG CLOSE (only if confirmed)
  * ===================================================================================== */
 Hooks.on("closeApplication", (app) => {
   try {
+    // GM mirror cleanup map
     if (app?._comaRequestId) globalThis._comaOpenRollDialogs.delete(app._comaRequestId);
+
+    // If this was a RollDialog and player confirmed, clear again (final guarantee)
+    if (app?._comArtifactsConfirmed && app?._comArtifactsActorId) {
+      try { clearSelAndUnhighlight(app._comArtifactsActorId); } catch (_) {}
+    }
   } catch (_) {}
 });
-
