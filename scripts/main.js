@@ -1,31 +1,34 @@
 const MODULE_ID = "com-artifacts";
-// ================== GM Review Bridge (TagReviewDialog + fallback) ==================
+
+/* =====================================================================================
+ * GM REVIEW BRIDGE
+ * - Player opens RollDialog with artifact entries -> send review request to GM
+ * - If City of Mist opens TagReviewDialog: inject artifact approvals into it
+ * - If it does NOT open (artifact-only): show fallback GM dialog
+ * - GM decision -> pushed back to player's open RollDialog, updates checkboxes and recalculates
+ * ===================================================================================== */
 const COMA_SOCKET = `module.${MODULE_ID}`;
 
-// On GM: pending artifact reviews keyed by requestId
-globalThis._comaPendingArtifactReview ??= new Map();
-
-// On Player: open RollDialogs keyed by requestId so we can apply GM toggles
+// Player: requestId -> RollDialog app
 globalThis._comaOpenRollDialogs ??= new Map();
 
-function comaSendArtifactReviewRequest({ requestId, actor, entries }) {
-  game.socket.emit(COMA_SOCKET, {
-    type: "coma-artifact-review-request",
-    requestId,
-    fromUserId: game.user.id,
-    fromUserName: game.user.name,
-    actorId: actor?.id,
-    actorName: actor?.name,
-    entries: entries.map((e, idx) => ({
-      idx,
-      label: e.label,
-      mod: e.mod,
-      checked: true
-    }))
-  });
+// GM: requestId -> {request, fallbackApp?, consumed?}
+globalThis._comaPendingReviews ??= new Map();
+
+function comaSendToGM(payload) {
+  game.socket.emit(COMA_SOCKET, payload);
 }
 
-function comaApplyArtifactTogglesToPlayerDialog(app, toggles) {
+function comaTrackPlayerRollDialog(requestId, app) {
+  globalThis._comaOpenRollDialogs.set(requestId, app);
+}
+
+function comaUntrackPlayerRollDialog(app) {
+  if (!app?._comaRequestId) return;
+  globalThis._comaOpenRollDialogs.delete(app._comaRequestId);
+}
+
+function comaApplyGMDecisionToPlayer(app, toggles) {
   const $root =
     app?.element ? (app.element.jquery ? app.element : $(app.element)) :
     null;
@@ -48,13 +51,17 @@ function comaApplyArtifactTogglesToPlayerDialog(app, toggles) {
   }
 }
 
-function comaOpenFallbackArtifactReviewDialog(req) {
+function comaOpenFallbackGMDialog(req) {
   const { requestId, fromUserId, fromUserName, actorName, entries } = req;
 
   const content = `
     <form class="coma-artifacts-review">
       <p><strong>Review Tags</strong> (Artifacts)</p>
-      <p style="opacity:.85;"><strong>Player:</strong> ${Handlebars.escapeExpression(fromUserName ?? "")} &nbsp; <strong>Actor:</strong> ${Handlebars.escapeExpression(actorName ?? "")}</p>
+      <p style="opacity:.85;">
+        <strong>Player:</strong> ${Handlebars.escapeExpression(fromUserName ?? "")}
+        &nbsp;&nbsp;
+        <strong>Actor:</strong> ${Handlebars.escapeExpression(actorName ?? "")}
+      </p>
       <hr/>
       <div style="max-height: 360px; overflow:auto;">
         ${
@@ -72,7 +79,7 @@ function comaOpenFallbackArtifactReviewDialog(req) {
     </form>
   `;
 
-  new Dialog({
+  const dlg = new Dialog({
     title: "Review Tags",
     content,
     buttons: {
@@ -81,6 +88,7 @@ function comaOpenFallbackArtifactReviewDialog(req) {
         callback: (html) => {
           const el = html?.[0];
           const checks = Array.from(el.querySelectorAll('input[type="checkbox"][data-idx]'));
+
           const toggles = (entries ?? []).map(e => {
             const idx = Number(e.idx);
             const c = checks.find(x => Number(x.getAttribute("data-idx")) === idx);
@@ -93,43 +101,22 @@ function comaOpenFallbackArtifactReviewDialog(req) {
             toUserId: fromUserId,
             toggles
           });
+
+          // mark consumed
+          const rec = globalThis._comaPendingReviews.get(requestId);
+          if (rec) rec.consumed = true;
         }
       },
       close: { label: "Close" }
     },
     default: "confirm"
-  }).render(true);
+  });
+
+  dlg.render(true);
+  return dlg;
 }
 
-Hooks.once("ready", () => {
-  game.socket.on(COMA_SOCKET, (msg) => {
-    if (!msg?.type) return;
-
-    // GM receives artifact review request
-    if (msg.type === "coma-artifact-review-request" && game.user.isGM) {
-      globalThis._comaPendingArtifactReview.set(msg.requestId, msg);
-
-      // If a TagReviewDialog is already open, we'll inject there in the render hook.
-      // If no TagReviewDialog opens (artifact-only), show fallback immediately.
-      // (If TagReview opens later, injection will still work; we also clear pending after injection.)
-      comaOpenFallbackArtifactReviewDialog({
-        requestId: msg.requestId,
-        fromUserId: msg.fromUserId,
-        fromUserName: msg.fromUserName,
-        actorName: msg.actorName,
-        entries: msg.entries
-      });
-      return;
-    }
-
-    // Player receives GM decision
-    if (msg.type === "coma-artifact-review-result" && msg.toUserId === game.user.id) {
-      const app = globalThis._comaOpenRollDialogs.get(msg.requestId);
-      if (app) comaApplyArtifactTogglesToPlayerDialog(app, msg.toggles);
-      return;
-    }
-  });
-});
+// GM: when TagReviewDialog renders, inject artifact approvals if we have a pending request
 Hooks.on("renderTagReviewDialog", (app, html) => {
   if (!game.user.isGM) return;
 
@@ -139,9 +126,12 @@ Hooks.on("renderTagReviewDialog", (app, html) => {
   // Prevent double injection
   if ($root.find(".coma-artifacts-in-review").length) return;
 
-  // Grab the most recent pending request (good enough for normal flows)
-  // If you need perfect correlation later, we can key by actorId/fromUserId.
-  const pending = Array.from(globalThis._comaPendingArtifactReview.values()).pop();
+  // Pick the most recent pending (normal gameplay: one review at a time)
+  const pending = Array.from(globalThis._comaPendingReviews.values())
+    .filter(r => !r.consumed)
+    .map(r => r.request)
+    .pop();
+
   if (!pending?.entries?.length) return;
 
   const $panel = $(`
@@ -156,20 +146,28 @@ Hooks.on("renderTagReviewDialog", (app, html) => {
           </label>
         `).join("")}
       </div>
+      <p style="opacity:.75; margin-top:6px;">These are artifact modifiers selected by the player.</p>
     </div>
   `);
 
-  // Insert into the dialog content; try common containers first
+  // Try common mount
   const $mount =
     $root.find(".window-content").first().length ? $root.find(".window-content").first() :
     $root;
 
   $mount.append($panel);
 
-  // When GM clicks the dialog "confirm"/approve, we need to send the state back.
-  // We hook the confirm button click generically.
+  // If fallback dialog is open for this request, close it (system dialog is now available)
+  const rec = globalThis._comaPendingReviews.get(pending.requestId);
+  if (rec?.fallbackApp) {
+    try { rec.fallbackApp.close(); } catch (_) {}
+    rec.fallbackApp = null;
+  }
+
+  // Send results when GM clicks Confirm/Approve in the TagReviewDialog
   $root.off("click.comaArtifactsReview").on("click.comaArtifactsReview", "button", (ev) => {
     const txt = ($(ev.currentTarget).text() ?? "").trim().toLowerCase();
+    // Accept typical labels; avoids hard-dependence on system internals
     if (!txt.includes("confirm") && !txt.includes("approve")) return;
 
     const toggles = pending.entries.map(e => {
@@ -185,144 +183,53 @@ Hooks.on("renderTagReviewDialog", (app, html) => {
       toggles
     });
 
-    // Clear pending so we don't inject again
-    globalThis._comaPendingArtifactReview.delete(pending.requestId);
+    const rec2 = globalThis._comaPendingReviews.get(pending.requestId);
+    if (rec2) rec2.consumed = true;
   });
 });
 
-
-/* =====================================================================================
- * GM APPROVAL WINDOW FOR PLAYER'S ROLLDIALOG (socket-based)
- * - Player opens RollDialog -> sends artifact checkbox list to GM
- * - GM toggles -> sends back -> player dialog updates live
- * ===================================================================================== */
-const COMA_SOCKET = `module.${MODULE_ID}`;
-
-// Track open RollDialogs on THIS client by requestId -> app instance
-globalThis._comaOpenRollDialogs ??= new Map();
-// Also keep the most recent RollDialog app (fallback)
-globalThis._comaLastRollDialogApp ??= null;
-
-function comaDebug(...args) {
-  // Flip to true if you want spammy logs
-  const DEBUG = false;
-  if (DEBUG) console.log(`${MODULE_ID} |`, ...args);
-}
-
-function comaOpenGMMirrorDialog(payload) {
-  const { requestId, fromUserId, fromUserName, actorName, boxes } = payload;
-
-  const content = `
-    <form class="coma-gm-mirror">
-      <p><strong>Player:</strong> ${Handlebars.escapeExpression(fromUserName ?? "Unknown")}</p>
-      <p><strong>Actor:</strong> ${Handlebars.escapeExpression(actorName ?? "Unknown")}</p>
-      <p>Toggle artifact modifiers, then click <strong>Apply</strong> to push to the player.</p>
-      <hr/>
-      <div style="max-height: 420px; overflow:auto; padding-right: 6px;">
-        ${
-          (boxes?.length ?? 0)
-            ? boxes.map(b => `
-              <div style="display:flex; gap:8px; align-items:center; margin:6px 0;">
-                <input type="checkbox"
-                       data-idx="${Number(b.idx)}"
-                       ${b.checked ? "checked" : ""}/>
-                <span>${Handlebars.escapeExpression(b.label ?? `Artifact ${Number(b.idx) + 1}`)}</span>
-                <span style="margin-left:auto; opacity:.8;">${Number(b.mod ?? 0) > 0 ? "+1" : "-1"}</span>
-              </div>
-            `).join("")
-            : `<div style="opacity:.8;">No artifact tags were highlighted for this roll.</div>`
-        }
-      </div>
-    </form>
-  `;
-
-  new Dialog({
-    title: "Make a Roll (GM Approval: Artifacts)",
-    content,
-    buttons: {
-      apply: {
-        icon: '<i class="fas fa-check"></i>',
-        label: "Apply",
-        callback: (html) => {
-          const el = html?.[0];
-          const inputs = Array.from(el.querySelectorAll('input[type="checkbox"][data-idx]'));
-
-          const updated = (boxes ?? []).map(b => {
-            const idx = Number(b.idx);
-            const inp = inputs.find(i => Number(i.getAttribute("data-idx")) === idx);
-            return { ...b, checked: inp ? inp.checked : !!b.checked };
-          });
-
-          game.socket.emit(COMA_SOCKET, {
-            type: "coma-gm-update",
-            requestId,
-            toUserId: fromUserId,
-            boxes: updated
-          });
-        }
-      },
-      close: { label: "Close" }
-    },
-    default: "apply"
-  }).render(true);
-}
-
-function comaApplyArtifactBoxesToApp(app, boxes) {
-  const $root =
-    app?.element ? (app.element.jquery ? app.element : $(app.element)) :
-    null;
-  if (!$root || !$root.length) return;
-
-  const $panel = $root.find(".com-artifacts-roll");
-  if (!$panel.length) return;
-
-  const $inputs = $panel.find("input.com-approve");
-  if (!$inputs.length) return;
-
-  for (const b of (boxes ?? [])) {
-    const idx = Number(b.idx);
-    const el = $inputs.get(idx);
-    if (!el) continue;
-
-    const changed = el.checked !== !!b.checked;
-    el.checked = !!b.checked;
-    if (changed) el.dispatchEvent(new Event("change", { bubbles: true }));
-  }
-
-  if (typeof app._comArtifactsRecompute === "function") {
-    try { app._comArtifactsRecompute(); } catch (_) {}
-  }
-}
-
 Hooks.once("ready", () => {
   game.socket.on(COMA_SOCKET, (msg) => {
-    if (!msg || !msg.type) return;
+    if (!msg?.type) return;
 
-    // GM receives request and opens approval window
-    if (msg.type === "coma-mirror-request" && game.user.isGM) {
-      comaDebug("GM received mirror request", msg);
-      comaOpenGMMirrorDialog(msg);
+    // GM receives review request
+    if (msg.type === "coma-artifact-review-request" && game.user.isGM) {
+      // store pending
+      globalThis._comaPendingReviews.set(msg.requestId, { request: msg, fallbackApp: null, consumed: false });
+
+      // Start short timer: if TagReviewDialog does NOT appear quickly, open fallback
+      setTimeout(() => {
+        const rec = globalThis._comaPendingReviews.get(msg.requestId);
+        if (!rec || rec.consumed) return;
+
+        // If TagReviewDialog already opened, our render hook will inject and close fallback.
+        // But we can’t reliably detect that; so we open fallback only if no fallback yet.
+        if (!rec.fallbackApp) {
+          rec.fallbackApp = comaOpenFallbackGMDialog({
+            requestId: msg.requestId,
+            fromUserId: msg.fromUserId,
+            fromUserName: msg.fromUserName,
+            actorName: msg.actorName,
+            entries: msg.entries
+          });
+        }
+      }, 350);
+
       return;
     }
 
-    // Player receives GM updates and applies to their currently open RollDialog
-    if (msg.type === "coma-gm-update" && msg.toUserId === game.user.id) {
-      comaDebug("Player received GM update", msg);
-
-      const app =
-        globalThis._comaOpenRollDialogs.get(msg.requestId) ??
-        globalThis._comaLastRollDialogApp;
-
-      if (app) comaApplyArtifactBoxesToApp(app, msg.boxes);
+    // Player receives GM decision
+    if (msg.type === "coma-artifact-review-result" && msg.toUserId === game.user.id) {
+      const app = globalThis._comaOpenRollDialogs.get(msg.requestId);
+      if (app) comaApplyGMDecisionToPlayer(app, msg.toggles);
       return;
     }
   });
 });
 
 Hooks.on("closeApplication", (app) => {
-  if (!app?._comaMirrorRequestId) return;
-  globalThis._comaOpenRollDialogs.delete(app._comaMirrorRequestId);
-  if (globalThis._comaLastRollDialogApp === app) globalThis._comaLastRollDialogApp = null;
+  // cleanup player map
+  comaUntrackPlayerRollDialog(app);
 });
 
 /* -------------------- Client-side selection (per-user, persisted) -------------------- */
@@ -876,7 +783,7 @@ Hooks.on("renderActorSheet", (app, html) => {
   installLockObserver(app, $html);
 });
 
-/* -------------------- RollDialog injection (robust) -------------------- */
+/* -------------------- RollDialog injection (robust, no ui.windows dependency) -------------------- */
 
 function findCustomModifierInput($root) {
   // Prefer label match
@@ -915,6 +822,7 @@ function buildSelectedEntries(artifacts, selSet) {
 
 Hooks.on("renderRollDialog", async (app, html) => {
   try {
+    // Some CoM refresh cycles can pass odd html; fall back to app.element.
     const $root =
       html?.jquery ? html :
       html ? $(html) :
@@ -948,29 +856,8 @@ Hooks.on("renderRollDialog", async (app, html) => {
     // Selection comes from THIS USER (persisted)
     const sel = getSel(actor.id);
     const entries = buildSelectedEntries(artifacts, sel);
-    // === GM review trigger for artifact tags ===
-// If the player selected any artifact tags, ask the GM to review them
-if (!game.user.isGM && entries.length) {
-  if (!app._comaMirrorRequestId) {
-    app._comaMirrorRequestId = foundry.utils.randomID();
-  }
 
-  // Track this RollDialog so GM decisions can update it
-  globalThis._comaOpenRollDialogs.set(app._comaMirrorRequestId, app);
-
-  // Make sure recompute is callable from socket updates
-  if (typeof app._comArtifactsRecompute !== "function") {
-    app._comArtifactsRecompute = () => {};
-  }
-
-  comaSendArtifactReviewRequest({
-    requestId: app._comaMirrorRequestId,
-    actor,
-    entries
-  });
-}
-
-
+    // Where to insert: prefer form if it exists, else insert into dialog content.
     const $form = $root.find("form").first();
     const $mount = $form.length ? $form : $root;
 
@@ -981,7 +868,7 @@ if (!game.user.isGM && entries.length) {
         <div class="com-artifacts-approve" style="display:flex; flex-direction:column; gap:6px;">
           ${
             entries.length
-              ? entries.map((e) => `
+              ? entries.map(e => `
                 <label style="display:flex; align-items:center; gap:8px;">
                   <input type="checkbox" class="com-approve" data-mod="${e.mod}" checked />
                   <span>${Handlebars.escapeExpression(e.label)}</span>
@@ -1015,40 +902,30 @@ if (!game.user.isGM && entries.length) {
       $modInput.trigger("change");
     }
 
+    // Expose for socket-driven updates
     app._comArtifactsRecompute = recomputeAndApply;
 
     recomputeAndApply();
     $panel.on("change", "input.com-approve", recomputeAndApply);
 
-    // === GM approval window trigger ===
-    // Only send from the PLAYER client (Browser B). GM receives and opens the approval dialog.
-    if (!game.user.isGM) {
-      if (!app._comaMirrorRequestId) app._comaMirrorRequestId = foundry.utils.randomID();
+    // Send review request to GM when player has artifact entries
+    if (!game.user.isGM && entries.length) {
+      if (!app._comaRequestId) app._comaRequestId = foundry.utils.randomID();
+      comaTrackPlayerRollDialog(app._comaRequestId, app);
 
-      globalThis._comaOpenRollDialogs.set(app._comaMirrorRequestId, app);
-      globalThis._comaLastRollDialogApp = app;
-
-      // Build boxes from entries (NOT from DOM), so the GM dialog always opens reliably.
-      const boxes = entries.map((e, idx) => ({
-        idx,
-        label: e.label,
-        mod: e.mod,
-        checked: true
-      }));
-
-      game.socket.emit(COMA_SOCKET, {
-        type: "coma-mirror-request",
-        requestId: app._comaMirrorRequestId,
+      comaSendToGM({
+        type: "coma-artifact-review-request",
+        requestId: app._comaRequestId,
         fromUserId: game.user.id,
         fromUserName: game.user.name,
         actorId: actor.id,
         actorName: actor.name,
-        boxes
-      });
-
-      comaDebug("Player sent mirror request", {
-        requestId: app._comaMirrorRequestId,
-        boxesCount: boxes.length
+        entries: entries.map((e, idx) => ({
+          idx,
+          label: e.label,
+          mod: e.mod,
+          checked: true
+        }))
       });
     }
 
