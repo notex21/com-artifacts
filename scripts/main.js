@@ -109,6 +109,33 @@ Hooks.once("ready", () => {
     }
   });
 });
+Hooks.on("preCreateChatMessage", (doc, data, options, userId) => {
+  try {
+    // Only act on the local player who created the roll
+    if (userId !== game.user.id) return;
+
+    // Only clear if this looks like a City of Mist roll message
+    const content = data.content ?? "";
+    if (typeof content !== "string") return;
+
+    // Heuristic: City of Mist rolls always contain this
+    if (!content.includes("CHANGE THE GAME") &&
+        !content.includes("Make a Roll") &&
+        !content.includes("Roll Bonus")) {
+      return;
+    }
+
+    const actorId = doc.speaker?.actor;
+    if (!actorId) return;
+
+    // Clear selection + UI highlight
+    clearSelAndUnhighlight(actorId);
+
+  } catch (e) {
+    console.warn("com-artifacts | failed to clear after roll", e);
+  }
+});
+
 
 /* -------------------- Client-side selection (per-user, persisted) -------------------- */
 globalThis.comArtifactsSelection ??= new Map();
