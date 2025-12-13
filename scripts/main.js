@@ -206,6 +206,84 @@ function comaApplyTogglesToRollDialog(app, toggles) {
 }
 
 /* =====================================================================================
+ * HOTBAR: FORCE-UNBLOCK BUTTON (manual override)
+ * ===================================================================================== */
+globalThis.comaForceUnblockConfirm ??= function comaForceUnblockConfirm() {
+  try {
+    // Remove overlays anywhere
+    document.querySelectorAll(".coma-confirm-overlay").forEach(o => o.remove());
+
+    // Re-enable Confirm in any open window that has it
+    const wins = Object.values(ui?.windows ?? {});
+    for (const app of wins) {
+      const el = app?.element;
+      const $root = el ? (el.jquery ? el : $(el)) : null;
+      if (!$root?.length) continue;
+
+      const $btn = $root.find("button.dialog-button")
+        .filter((_, b) => ((b.textContent ?? "").trim().toLowerCase() === "confirm"))
+        .first();
+
+      if ($btn?.length) $btn.prop("disabled", false);
+      $root.find(".dialog-buttons .coma-confirm-overlay").remove();
+
+      if (app) app._comaConfirmBlocked = false;
+    }
+
+    // Also try the requestId map if present
+    try {
+      globalThis._comaOpenRollDialogs?.forEach((app) => {
+        const el = app?.element;
+        const $root = el ? (el.jquery ? el : $(el)) : null;
+        if (!$root?.length) return;
+
+        const $btn = $root.find("button.dialog-button")
+          .filter((_, b) => ((b.textContent ?? "").trim().toLowerCase() === "confirm"))
+          .first();
+
+        if ($btn?.length) $btn.prop("disabled", false);
+        $root.find(".dialog-buttons .coma-confirm-overlay").remove();
+
+        app._comaConfirmBlocked = false;
+      });
+    } catch (_) {}
+
+    ui?.notifications?.info?.("COMA: Confirm unblocked.");
+    comaLog("Force-unblocked Confirm overlays.");
+  } catch (e) {
+    comaWarn("comaForceUnblockConfirm failed", e);
+  }
+};
+
+async function comaEnsureHotbarUnblockMacro() {
+  const name = "COMA: Unblock Confirm";
+  const command = `globalThis.comaForceUnblockConfirm?.();`;
+
+  let macro = game.macros?.find(m => m?.name === name);
+  if (!macro) {
+    macro = await Macro.create({
+      name,
+      type: "script",
+      scope: "global",
+      command,
+      img: "icons/svg/unlock.svg"
+    });
+  } else if ((macro.command ?? "").trim() !== command.trim()) {
+    await macro.update({ command });
+  }
+
+  const hotbar = game.user?.hotbar ?? {};
+  let slot = null;
+  for (let i = 1; i <= 10; i++) {
+    if (!hotbar[i]) { slot = i; break; }
+  }
+  if (!slot) slot = 10;
+
+  await game.user.assignHotbarMacro(macro, slot);
+  comaLog(`Hotbar macro assigned to slot ${slot}.`);
+}
+
+/* =====================================================================================
  * READY: socket receive + chat approve wiring
  * ===================================================================================== */
 Hooks.once("ready", () => {
@@ -252,6 +330,12 @@ Hooks.once("ready", () => {
       comaWarn("socket handler error", e);
     }
   });
+});
+
+// Ensure the hotbar button exists for each user
+Hooks.once("ready", async () => {
+  try { await comaEnsureHotbarUnblockMacro(); }
+  catch (e) { comaWarn("Failed to install hotbar macro", e); }
 });
 
 Hooks.on("renderChatMessageHTML", (message, htmlEl) => {
