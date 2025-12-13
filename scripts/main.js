@@ -650,6 +650,26 @@ function buildSelectedEntries(artifacts, selSet) {
 
 Hooks.on("renderRollDialog", async (app, html) => {
   try {
+        // ===== CLEAR ARTIFACT SELECTION ON CONFIRM (your requested behavior) =====
+    // When the player presses Confirm in the Make a Roll dialog,
+    // remove .com-picked from all artifact tags and clear the saved selection.
+    // (This matches: pic1 click => pic2 class removed => pic3 state.)
+    const $confirmBtn =
+      $root.find("button.dialog-button.one.default, button.dialog-button.default, button.dialog-button.one")
+        .filter((_, el) => ((el.textContent ?? "").trim().toLowerCase() === "confirm"))
+        .first();
+
+    if ($confirmBtn?.length) {
+      $confirmBtn.off("click.comArtifactsClearOnConfirm").on("click.comArtifactsClearOnConfirm", () => {
+        try {
+          clearSelAndUnhighlight(actor.id); // clears flags + removes yellow highlight on the open sheet
+        } catch (e) {
+          console.warn(`${MODULE_ID} | failed to clear on confirm`, e);
+        }
+      });
+    }
+    // =======================================================================
+
     const $root =
       html?.jquery ? html :
       html ? $(html) :
