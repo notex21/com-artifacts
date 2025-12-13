@@ -1,291 +1,13 @@
 const MODULE_ID = "com-artifacts";
 
 /* =====================================================================================
- * SOCKET + APPROVAL PATH (chat-based GM approval)
+ * SOCKET: GM MIRROR (optional approval UI)
  * ===================================================================================== */
 const COMA_SOCKET = `module.${MODULE_ID}`;
-globalThis._comaOpenRollDialogs ??= new Map(); // requestId -> RollDialog app
-globalThis._comaPendingExec ??= new Map();     // userId -> { requestId, actorId, ts }
+globalThis._comaOpenRollDialogs ??= new Map();
 
 function comaLog(...a) { console.log(`${MODULE_ID} |`, ...a); }
-function comaWarn(...a) { console.warn(`${MODULE_ID} |`, ...a); }
 
-function comaNow() { return Date.now(); }
-function comaRand() { return (foundry?.utils?.randomID?.() ?? randomID()); }
-
-function comaGetGMIds() {
-  const gms = (game.users ?? []).filter(u => u.isGM);
-  return gms.map(u => u.id);
-}
-function comaWhisperToGMsData() { return { whisper: comaGetGMIds() }; }
-
-/** Build the GM chat card HTML. */
-function comaBuildGMChatContent({ requestId, fromUserName, actorName, entries }) {
-  const safe = (s) => Handlebars.escapeExpression(String(s ?? ""));
-  const rows = (entries?.length ? entries : []).map((e) => {
-    const idx = Number(e.idx);
-    const mod = Number(e.mod ?? 0);
-    const sign = mod > 0 ? "+1" : "-1";
-    return `
-      <label style="display:flex; align-items:center; gap:8px; margin:4px 0;">
-        <input type="checkbox" class="coma-approve" data-idx="${idx}" ${e.checked ? "checked" : ""}/>
-        <span>${safe(e.label ?? "")}</span>
-        <span style="margin-left:auto; opacity:.8;">${sign}</span>
-      </label>
-    `;
-  }).join("");
-
-  return `
-    <div class="coma-approval-card" data-request-id="${safe(requestId)}" style="display:flex; flex-direction:column; gap:8px;">
-      <div style="opacity:.9;">
-        <div><strong>From:</strong> ${safe(fromUserName)}</div>
-        <div><strong>Actor:</strong> ${safe(actorName)}</div>
-      </div>
-
-      <fieldset style="padding:8px; border:1px solid var(--color-border-light-primary); border-radius:6px;">
-        <legend>Artifacts (Approval)</legend>
-        <div style="display:flex; flex-direction:column; gap:2px; max-height:260px; overflow:auto;">
-          ${rows || `<div style="opacity:.8;">No artifact tags selected.</div>`}
-        </div>
-      </fieldset>
-
-      <div style="display:flex; gap:8px; justify-content:flex-end;">
-        <button type="button" class="coma-approve-btn" data-request-id="${safe(requestId)}">
-          Approve
-        </button>
-      </div>
-
-      <div style="opacity:.75; font-size:12px;">
-        Tip: uncheck any tags you don't allow, then click Approve.
-      </div>
-    </div>
-  `;
-}
-
-/** Send GM approval request as a GM-only chat message. */
-async function comaSendGMApprovalChat({ requestId, fromUserId, fromUserName, actorId, actorName, entries }) {
-  try {
-    const flags = {
-      [MODULE_ID]: {
-        type: "coma-approval",
-        requestId,
-        fromUserId,
-        actorId,
-        actorName,
-        entries: Array.isArray(entries) ? entries : []
-      }
-    };
-
-    const content = comaBuildGMChatContent({ requestId, fromUserName, actorName, entries });
-
-    await ChatMessage.create({
-      content,
-      speaker: { alias: "GM Approval" },
-      ...comaWhisperToGMsData(),
-      flags
-    });
-  } catch (e) {
-    comaWarn("Failed to send GM approval chat message", e);
-  }
-}
-
-/** Find a RollDialog confirm button inside a root. */
-function comaFindConfirmButton($root) {
-  return $root.find("button.dialog-button")
-    .filter((_, el) => ((el.textContent ?? "").trim().toLowerCase() === "confirm"))
-    .first();
-}
-
-/** Create/refresh the gray blocker overlay above the Confirm button. */
-function comaBlockConfirm(app, $root, label = "Waiting for GM approval...") {
-  try {
-    const $btn = comaFindConfirmButton($root);
-    if (!$btn?.length) return;
-
-    $btn.prop("disabled", true);
-
-    const $container = $btn.closest(".dialog-buttons");
-    if (!$container.length) return;
-
-    $container.css("position", "relative");
-
-    let $overlay = $container.find(".coma-confirm-overlay");
-    if (!$overlay.length) {
-      $overlay = $(`<div class="coma-confirm-overlay"></div>`);
-      $container.append($overlay);
-    }
-
-    const contRect = $container[0].getBoundingClientRect();
-    const btnRect = $btn[0].getBoundingClientRect();
-
-    const left = Math.max(0, btnRect.left - contRect.left);
-    const top  = Math.max(0, btnRect.top  - contRect.top);
-
-    $overlay.css({
-      position: "absolute",
-      left: `${left}px`,
-      top: `${top}px`,
-      width: `${btnRect.width}px`,
-      height: `${btnRect.height}px`,
-      background: "rgba(160,160,160,0.45)",
-      borderRadius: "6px",
-      zIndex: 9999,
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      pointerEvents: "auto",
-      userSelect: "none",
-      fontSize: "12px",
-      fontWeight: "600",
-      color: "rgba(0,0,0,0.75)"
-    }).text(label);
-
-    app._comaConfirmBlocked = true;
-    app._comaConfirmOverlayMounted = true;
-  } catch (e) {
-    comaWarn("comaBlockConfirm failed", e);
-  }
-}
-
-/** Remove the confirm blocker overlay and re-enable Confirm. */
-function comaUnblockConfirm(app, $root) {
-  try {
-    const $btn = comaFindConfirmButton($root);
-    if ($btn?.length) $btn.prop("disabled", false);
-
-    const $container = $root.find(".dialog-buttons");
-    $container.find(".coma-confirm-overlay").remove();
-
-    app._comaConfirmBlocked = false;
-  } catch (e) {
-    comaWarn("comaUnblockConfirm failed", e);
-  }
-}
-
-/** Resolve a RollDialog app for a requestId even if the map is missing it. */
-function comaResolveRollDialogByRequestId(requestId) {
-  const direct = globalThis._comaOpenRollDialogs.get(requestId);
-  if (direct) return direct;
-
-  try {
-    const wins = Object.values(ui?.windows ?? {});
-    for (const w of wins) {
-      if (!w) continue;
-      if (w._comaRequestId === requestId) return w;
-      if (w.options?.id && String(w.options.id).includes("RollDialog") && w._comaRequestId === requestId) return w;
-    }
-  } catch (_) {}
-
-  return null;
-}
-
-/** Apply GM toggles to the player's artifacts panel checkboxes. */
-function comaApplyTogglesToRollDialog(app, toggles) {
-  const $root = app?.element ? (app.element.jquery ? app.element : $(app.element)) : null;
-  if (!$root?.length) return;
-
-  const $panel = $root.find(".com-artifacts-roll");
-  if (!$panel.length) return;
-
-  const inputs = $panel.find("input.com-approve").toArray();
-  for (const t of (toggles ?? [])) {
-    const idx = Number(t.idx);
-    const el = inputs[idx];
-    if (!el) continue;
-
-    const newChecked = !!t.checked;
-    const changed = el.checked !== newChecked;
-    el.checked = newChecked;
-
-    if (changed) el.dispatchEvent(new Event("change", { bubbles: true }));
-  }
-
-  if (typeof app._comArtifactsRecompute === "function") {
-    try { app._comArtifactsRecompute(); } catch (_) {}
-  }
-}
-
-/* =====================================================================================
- * HOTBAR: FORCE-UNBLOCK BUTTON (manual override)
- * ===================================================================================== */
-globalThis.comaForceUnblockConfirm ??= function comaForceUnblockConfirm() {
-  try {
-    // Remove overlays anywhere
-    document.querySelectorAll(".coma-confirm-overlay").forEach(o => o.remove());
-
-    // Re-enable Confirm in any open window that has it
-    const wins = Object.values(ui?.windows ?? {});
-    for (const app of wins) {
-      const el = app?.element;
-      const $root = el ? (el.jquery ? el : $(el)) : null;
-      if (!$root?.length) continue;
-
-      const $btn = $root.find("button.dialog-button")
-        .filter((_, b) => ((b.textContent ?? "").trim().toLowerCase() === "confirm"))
-        .first();
-
-      if ($btn?.length) $btn.prop("disabled", false);
-      $root.find(".dialog-buttons .coma-confirm-overlay").remove();
-
-      if (app) app._comaConfirmBlocked = false;
-    }
-
-    // Also try the requestId map if present
-    try {
-      globalThis._comaOpenRollDialogs?.forEach((app) => {
-        const el = app?.element;
-        const $root = el ? (el.jquery ? el : $(el)) : null;
-        if (!$root?.length) return;
-
-        const $btn = $root.find("button.dialog-button")
-          .filter((_, b) => ((b.textContent ?? "").trim().toLowerCase() === "confirm"))
-          .first();
-
-        if ($btn?.length) $btn.prop("disabled", false);
-        $root.find(".dialog-buttons .coma-confirm-overlay").remove();
-
-        app._comaConfirmBlocked = false;
-      });
-    } catch (_) {}
-
-    ui?.notifications?.info?.("COMA: Confirm unblocked.");
-    comaLog("Force-unblocked Confirm overlays.");
-  } catch (e) {
-    comaWarn("comaForceUnblockConfirm failed", e);
-  }
-};
-
-async function comaEnsureHotbarUnblockMacro() {
-  const name = "COMA: Unblock Confirm";
-  const command = `globalThis.comaForceUnblockConfirm?.();`;
-
-  let macro = game.macros?.find(m => m?.name === name);
-  if (!macro) {
-    macro = await Macro.create({
-      name,
-      type: "script",
-      scope: "global",
-      command,
-      img: "icons/svg/unlock.svg"
-    });
-  } else if ((macro.command ?? "").trim() !== command.trim()) {
-    await macro.update({ command });
-  }
-
-  const hotbar = game.user?.hotbar ?? {};
-  let slot = null;
-  for (let i = 1; i <= 10; i++) {
-    if (!hotbar[i]) { slot = i; break; }
-  }
-  if (!slot) slot = 10;
-
-  await game.user.assignHotbarMacro(macro, slot);
-  comaLog(`Hotbar macro assigned to slot ${slot}.`);
-}
-
-/* =====================================================================================
- * READY: socket receive + chat approve wiring
- * ===================================================================================== */
 Hooks.once("ready", () => {
   comaLog("READY", { user: game.user?.name, isGM: game.user?.isGM });
 
@@ -293,107 +15,95 @@ Hooks.once("ready", () => {
     try {
       if (!msg?.type) return;
 
-      // Main result message: apply toggles (if any) and UNBLOCK confirm
-      if (msg.type === "coma-mirror-result" && msg.toUserId === game.user.id) {
-        const app =
-          globalThis._comaOpenRollDialogs.get(msg.requestId) ||
-          comaResolveRollDialogByRequestId(msg.requestId);
+      // GM receives request -> show mirror dialog
+      if (msg.type === "coma-mirror-request" && game.user.isGM) {
+        const entries = Array.isArray(msg.entries) ? msg.entries : [];
 
-        if (app) {
-          if (msg.toggles) comaApplyTogglesToRollDialog(app, msg.toggles);
+        const content = `
+          <div>
+            <div style="opacity:.85; margin-bottom:6px;">
+              <div><strong>From:</strong> ${Handlebars.escapeExpression(msg.fromUserName ?? "")}</div>
+              <div><strong>Actor:</strong> ${Handlebars.escapeExpression(msg.actorName ?? "")}</div>
+            </div>
 
-          const $root = app?.element ? (app.element.jquery ? app.element : $(app.element)) : null;
-          if ($root?.length) {
-            comaUnblockConfirm(app, $root);
-            app._comaGateApproved = true;
-          }
-        } else {
-          // Last-resort: remove any overlay that exists in any open window (requestId unknown)
-          try { $(".coma-confirm-overlay").remove(); } catch (_) {}
-        }
+            <fieldset style="padding:8px; border:1px solid var(--color-border-light-primary); border-radius:6px;">
+              <legend>Artifacts (Mirror)</legend>
+              <div style="display:flex; flex-direction:column; gap:6px; max-height:320px; overflow:auto;">
+                ${
+                  entries.length
+                    ? entries.map((e) => `
+                      <label style="display:flex; align-items:center; gap:8px;">
+                        <input type="checkbox" class="coma-approve" data-idx="${Number(e.idx)}" ${e.checked ? "checked" : ""}/>
+                        <span>${Handlebars.escapeExpression(e.label ?? "")}</span>
+                        <span style="margin-left:auto; opacity:.8;">${Number(e.mod) > 0 ? "+1" : "-1"}</span>
+                      </label>
+                    `).join("")
+                    : `<div style="opacity:.8;">No highlighted artifact tags.</div>`
+                }
+              </div>
+            </fieldset>
+          </div>
+        `;
+
+        new Dialog({
+          title: "Review Tags",
+          content,
+          buttons: {
+            apply: {
+              label: "Approve",
+              callback: (html) => {
+                const root = html?.[0];
+                const checks = Array.from(root.querySelectorAll("input.coma-approve[data-idx]"));
+                const toggles = entries.map((e) => {
+                  const idx = Number(e.idx);
+                  const c = checks.find(x => Number(x.getAttribute("data-idx")) === idx);
+                  return { ...e, checked: c ? c.checked : !!e.checked };
+                });
+
+                game.socket.emit(COMA_SOCKET, {
+                  type: "coma-mirror-result",
+                  requestId: msg.requestId,
+                  toUserId: msg.fromUserId,
+                  toggles
+                });
+              }
+            },
+            close: { label: "Close" }
+          },
+          default: "apply"
+        }).render(true);
+
+        return;
       }
 
-      // Optional explicit unblock message (extra safety)
-      if (msg.type === "coma-unblock-confirm" && msg.toUserId === game.user.id) {
-        const app =
-          globalThis._comaOpenRollDialogs.get(msg.requestId) ||
-          comaResolveRollDialogByRequestId(msg.requestId);
+      // Player receives result -> apply to their open RollDialog
+      if (msg.type === "coma-mirror-result" && msg.toUserId === game.user.id) {
+        const app = globalThis._comaOpenRollDialogs.get(msg.requestId);
+        if (!app) return;
 
-        if (app) {
-          const $root = app?.element ? (app.element.jquery ? app.element : $(app.element)) : null;
-          if ($root?.length) comaUnblockConfirm(app, $root);
-        } else {
-          try { $(".coma-confirm-overlay").remove(); } catch (_) {}
+        const $root = app?.element ? (app.element.jquery ? app.element : $(app.element)) : null;
+        if (!$root?.length) return;
+
+        const $panel = $root.find(".com-artifacts-roll");
+        if (!$panel.length) return;
+
+        const inputs = $panel.find("input.com-approve").toArray();
+        for (const t of (msg.toggles ?? [])) {
+          const el = inputs[Number(t.idx)];
+          if (!el) continue;
+          const changed = el.checked !== !!t.checked;
+          el.checked = !!t.checked;
+          if (changed) el.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+
+        if (typeof app._comArtifactsRecompute === "function") {
+          try { app._comArtifactsRecompute(); } catch (_) {}
         }
       }
     } catch (e) {
-      comaWarn("socket handler error", e);
+      console.warn(`${MODULE_ID} | socket handler error`, e);
     }
   });
-});
-
-// Ensure the hotbar button exists for each user
-Hooks.once("ready", async () => {
-  try { await comaEnsureHotbarUnblockMacro(); }
-  catch (e) { comaWarn("Failed to install hotbar macro", e); }
-});
-
-Hooks.on("renderChatMessageHTML", (message, htmlEl) => {
-  try {
-    if (!game.user.isGM) return;
-    if (!(htmlEl instanceof HTMLElement)) return;
-
-    const flags = message?.flags?.[MODULE_ID];
-    if (!flags || flags.type !== "coma-approval") return;
-
-    const card = htmlEl.querySelector(`.coma-approval-card[data-request-id="${CSS.escape(flags.requestId)}"]`);
-    if (!card) return;
-
-    if (card.dataset._comaBound === "1") return;
-    card.dataset._comaBound = "1";
-
-    const btn = card.querySelector(".coma-approve-btn");
-    if (!btn) return;
-
-    btn.addEventListener("click", async (ev) => {
-      ev.preventDefault();
-      ev.stopPropagation();
-
-      const requestId = flags.requestId;
-      const fromUserId = flags.fromUserId;
-
-      const entries = Array.isArray(flags.entries) ? flags.entries : [];
-      const checks = Array.from(card.querySelectorAll("input.coma-approve[data-idx]"));
-
-      const toggles = entries.map((e) => {
-        const idx = Number(e.idx);
-        const c = checks.find(x => Number(x.getAttribute("data-idx")) === idx);
-        return { ...e, checked: c ? c.checked : !!e.checked };
-      });
-
-      // Send result to player (this is what should remove the blocker on their side)
-      game.socket.emit(COMA_SOCKET, {
-        type: "coma-mirror-result",
-        requestId,
-        toUserId: fromUserId,
-        toggles
-      });
-
-      // Extra safety: also send explicit unblock instruction
-      game.socket.emit(COMA_SOCKET, {
-        type: "coma-unblock-confirm",
-        requestId,
-        toUserId: fromUserId
-      });
-
-      try {
-        btn.disabled = true;
-        btn.textContent = "Approved";
-      } catch (_) {}
-    });
-  } catch (e) {
-    comaWarn("renderChatMessageHTML hook error", e);
-  }
 });
 
 /* =====================================================================================
@@ -407,7 +117,7 @@ function loadSelectionFromUserFlag(actorId) {
     const arr = Array.isArray(all?.[actorId]) ? all[actorId] : [];
     return new Set(arr.filter(Boolean));
   } catch (e) {
-    comaWarn("failed to read selection flag", e);
+    console.warn(`${MODULE_ID} | failed to read selection flag`, e);
     return new Set();
   }
 }
@@ -422,7 +132,7 @@ function scheduleSaveSelection(actorId) {
       all[actorId] = Array.from(set);
       await game.user.setFlag(MODULE_ID, "selection", all);
     } catch (e) {
-      comaWarn("failed to save selection flag", e);
+      console.warn(`${MODULE_ID} | failed to save selection flag`, e);
     }
   }, 150);
 }
@@ -447,6 +157,7 @@ function clearSel(actorId) {
   scheduleSaveSelection(actorId);
 }
 
+/** Clears selection AND immediately removes yellow highlight on the open sheet (if any). */
 function clearSelAndUnhighlight(actorId) {
   try {
     clearSel(actorId);
@@ -460,7 +171,7 @@ function clearSelAndUnhighlight(actorId) {
       $el.find(".com-tag-pick.com-picked").removeClass("com-picked");
     }
   } catch (e) {
-    comaWarn("clearSelAndUnhighlight failed", e);
+    console.warn(`${MODULE_ID} | clearSelAndUnhighlight failed`, e);
   }
 }
 
@@ -469,8 +180,18 @@ function clearSelAndUnhighlight(actorId) {
  * ===================================================================================== */
 function defaultArtifacts() {
   return [
-    { name: "Artifact 1", img: "", power: [{ name: "", active: false }, { name: "", active: false }], weakness: { name: "", active: false } },
-    { name: "Artifact 2", img: "", power: [{ name: "", active: false }, { name: "", active: false }], weakness: { name: "", active: false } }
+    {
+      name: "Artifact 1",
+      img: "",
+      power: [{ name: "", active: false }, { name: "", active: false }],
+      weakness: { name: "", active: false }
+    },
+    {
+      name: "Artifact 2",
+      img: "",
+      power: [{ name: "", active: false }, { name: "", active: false }],
+      weakness: { name: "", active: false }
+    }
   ];
 }
 
@@ -510,7 +231,7 @@ function isSheetUnlocked(html) {
 }
 
 /* =====================================================================================
- * SHEET UI: ARTIFACTS TAB
+ * SHEET UI: ARTIFACTS TAB (NO REFRESH when entering edit; only save on exit)
  * ===================================================================================== */
 function ensureArtifactsTab(app, html, actor) {
   if (!actor?.testUserPermission(game.user, "OWNER")) return;
@@ -522,29 +243,111 @@ function ensureArtifactsTab(app, html, actor) {
       .com-artifacts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
       .com-artifact { border: 1px solid var(--color-border-light-primary); border-radius: 10px; padding: 12px; box-sizing: border-box; }
       .com-topbar { display:flex; justify-content:flex-end; margin-bottom:6px; }
-      .com-edit-toggle{ background: rgba(120, 80, 160, .12); border: 1px solid rgba(120, 80, 160, .55); border-radius: 10px; width: 36px; height: 24px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; color: var(--color-text-hyperlink); }
+
+      .com-edit-toggle{
+        background: rgba(120, 80, 160, .12);
+        border: 1px solid rgba(120, 80, 160, .55);
+        border-radius: 10px;
+        width: 36px;
+        height: 24px;
+        cursor:pointer;
+        display:inline-flex;
+        align-items:center;
+        justify-content:center;
+        color: var(--color-text-hyperlink); /* keep purple-ish system hyperlink color */
+      }
       .com-edit-toggle[disabled]{ opacity:.55; cursor:default; }
+
       .com-center { display:flex; flex-direction:column; align-items:center; gap:10px; }
-      .com-name-display{ font-size: 1.5em; font-weight: 600; color: var(--color-text-hyperlink); text-align:center; line-height: 1.1; max-width: 100%; word-break: break-word; margin-top: 2px; }
+
+      .com-name-display{
+        font-size: 1.5em;
+        font-weight: 600;
+        color: var(--color-text-hyperlink);
+        text-align:center;
+        line-height: 1.1;
+        max-width: 100%;
+        word-break: break-word;
+        margin-top: 2px;
+      }
       .com-name-input{ width: 100%; max-width: 320px; box-sizing:border-box; }
-      .com-artifact-img{ width: 192px; height: 192px; border: 1px solid var(--color-border-light-primary); border-radius: 10px; background-size: cover; background-position: center; background-repeat:no-repeat; display:flex; align-items:center; justify-content:center; user-select:none; box-sizing: border-box; }
+
+      .com-artifact-img{
+        width: 192px;
+        height: 192px;
+        border: 1px solid var(--color-border-light-primary);
+        border-radius: 10px;
+        background-size: cover;
+        background-position: center;
+        background-repeat:no-repeat;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        user-select:none;
+        box-sizing: border-box;
+      }
       .com-artifact-img.com-img-clickable{ cursor:pointer; }
       .com-artifact-img.com-img-disabled{ cursor:default; opacity:.85; }
-      .com-artifact-img .com-img-ph{ font-size: 42px; opacity: .85; color: var(--color-text-hyperlink); }
-      .com-tag-box{ width: 192px; border-radius: 10px; padding: 8px 10px; margin-top: 8px; border: 1px solid rgba(120, 80, 160, .55); background: rgba(120, 80, 160, .10); box-shadow: 0 0 0 2px rgba(120, 80, 160, .08); box-sizing: border-box; overflow: hidden; }
-      .com-tag-box-title{ font-size: 12px; opacity: .85; margin-bottom: 6px; text-align:center; }
-      .com-tag-pill{ display:inline-flex; align-items:center; gap: 8px; padding: 4px 10px; border-radius: 10px; cursor:pointer; user-select:none; border: 1px solid transparent; margin: 6px 0; box-sizing: border-box; max-width: 100%; }
-      .com-tag-pill:hover{ border-color: rgba(120, 80, 160, .45); box-shadow: 0 0 0 2px rgba(120, 80, 160, .12); }
+
+      .com-artifact-img .com-img-ph{
+        font-size: 42px;
+        opacity: .85;
+        color: var(--color-text-hyperlink);
+      }
+
+      .com-tag-box{
+        width: 192px;
+        border-radius: 10px;
+        padding: 8px 10px;
+        margin-top: 8px;
+        border: 1px solid rgba(120, 80, 160, .55);
+        background: rgba(120, 80, 160, .10);
+        box-shadow: 0 0 0 2px rgba(120, 80, 160, .08);
+        box-sizing: border-box;
+        overflow: hidden;
+      }
+      .com-tag-box-title{
+        font-size: 12px;
+        opacity: .85;
+        margin-bottom: 6px;
+        text-align:center;
+      }
+
+      .com-tag-pill{
+        display:inline-flex;
+        align-items:center;
+        gap: 8px;
+        padding: 4px 10px;
+        border-radius: 10px;
+        cursor:pointer;
+        user-select:none;
+        border: 1px solid transparent;
+        margin: 6px 0;
+        box-sizing: border-box;
+        max-width: 100%;
+      }
+      .com-tag-pill:hover{
+        border-color: rgba(120, 80, 160, .45);
+        box-shadow: 0 0 0 2px rgba(120, 80, 160, .12);
+      }
+
       .com-tag-pill.com-picked { background: #ffeb3b; }
       .com-tag-pill.com-weak.com-picked { background: #ffd54f; }
+
       .com-view-only{ display: block; }
       .com-edit-only{ display: none; }
       .com-artifact.com-editing .com-view-only{ display:none; }
       .com-artifact.com-editing .com-edit-only{ display:block; }
+
       .com-edit-fields{ width: 100%; box-sizing:border-box; display:flex; flex-direction:column; gap:8px; }
       .com-edit-fields label{ font-size: 12px; opacity:.85; }
       .com-edit-fields input{ width: 100%; max-width: 100%; box-sizing:border-box; }
-      .com-edit-fields input:focus, .com-name-input:focus{ outline: none; box-shadow: 0 0 0 2px rgba(120, 80, 160, .25); }
+
+      .com-edit-fields input:focus, .com-name-input:focus{
+        outline: none;
+        box-shadow: 0 0 0 2px rgba(120, 80, 160, .25);
+      }
+
       .com-artifact .hint { opacity: .8; font-size: 12px; margin-top: 10px; text-align:center; }
     `;
     document.head.appendChild(style);
@@ -568,6 +371,8 @@ function ensureArtifactsTab(app, html, actor) {
     `);
   }
 
+  // Optional: if they click the sheet lock button, we re-render so the edit buttons enable/disable correctly.
+  // (This is separate from your artifact edit toggle; it does not fire when you click the artifact edit toggle.)
   try {
     if (!app._comArtifactsLockHooked) {
       app._comArtifactsLockHooked = true;
@@ -661,6 +466,7 @@ function ensureArtifactsTab(app, html, actor) {
 
     grid.html(artifacts.map(renderCard).join(""));
 
+    // restore highlight from selection
     const sel = getSel(actor.id);
     grid.find(".com-tag-pill").each((_, el) => {
       const key = el.dataset.pick;
@@ -683,8 +489,10 @@ function ensureArtifactsTab(app, html, actor) {
       $hint.text(on ? "Editing: update fields and click the lock again to save." : "Click tags to select/deselect.");
     }
 
+    // Ensure all cards start NOT editing (no refresh needed, just DOM state)
     grid.find(".com-artifact").each((_, el) => setCardEditing($(el), false));
 
+    // View mode: click to select/deselect (blocked in edit mode)
     grid.off("click.comArtifactsPick").on("click.comArtifactsPick", ".com-tag-pill", (ev) => {
       const $sec = $(ev.currentTarget).closest(".com-artifact");
       if ($sec.hasClass("com-editing")) return;
@@ -694,6 +502,9 @@ function ensureArtifactsTab(app, html, actor) {
       $(ev.currentTarget).toggleClass("com-picked", set.has(key));
     });
 
+    // Edit toggle:
+    // - First click: enter edit mode, NO sheet refresh.
+    // - Second click: save + update view DOM, still NO sheet refresh.
     grid.off("click.comArtifactsToggle").on("click.comArtifactsToggle", ".com-edit-toggle", async (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
@@ -709,6 +520,7 @@ function ensureArtifactsTab(app, html, actor) {
         return;
       }
 
+      // Leaving edit mode -> commit changes
       const artifacts2 = await getArtifacts(actor);
 
       const name = ($sec.find(`input[data-field="name"]`).val() ?? "").toString();
@@ -726,6 +538,7 @@ function ensureArtifactsTab(app, html, actor) {
 
       await setArtifacts(actor, artifacts2);
 
+      // Update view DOM in-place (no actor sheet refresh)
       const dispName = (name ?? "").trim() || `Artifact ${idx + 1}`;
       $sec.find(".com-name-text").text(dispName);
 
@@ -743,6 +556,7 @@ function ensureArtifactsTab(app, html, actor) {
       if (ww) $wView.append($(pill(`a${idx}.w`, ww, true, "fa-angle-double-down")));
       else $wView.append($(`<div style="opacity:.6; text-align:center; font-size:12px;">(empty)</div>`));
 
+      // Re-apply selection highlight to any newly re-rendered pills inside this section
       const s = getSel(actor.id);
       $sec.find(".com-tag-pill").each((_, el2) => {
         const key = el2.dataset.pick;
@@ -753,6 +567,7 @@ function ensureArtifactsTab(app, html, actor) {
       forceActivateTab(app, app._comLastTab || MODULE_ID);
     });
 
+    // Image pick only in edit mode + sheet unlocked (still no refresh)
     grid.off("click.comArtifactsImg").on("click.comArtifactsImg", ".com-artifact-img[data-action='pick-image']", async (ev) => {
       const $sec = $(ev.currentTarget).closest(".com-artifact");
       const idx = Number($sec.data("idx"));
@@ -769,6 +584,7 @@ function ensureArtifactsTab(app, html, actor) {
           artifacts2[idx].img = path;
           await setArtifacts(actor, artifacts2);
 
+          // Update image in-place (no refresh)
           const $img = $sec.find(".com-artifact-img").first();
           $img.css("background-image", path ? `url('${String(path).replace(/'/g, "%27")}')` : "");
           if (path) $img.find(".com-img-ph").remove();
@@ -793,35 +609,16 @@ Hooks.on("renderActorSheet", (app, html) => {
     ensureArtifactsTab(app, $html, actor);
     forceActivateTab(app, app._comLastTab);
 
-    // EXECUTE MOVE HOOK: mark next RollDialog as needing approval
-    if (!app._comaExecuteHooked) {
-      app._comaExecuteHooked = true;
-
-      $html.off("click.comaExecute").on("click.comaExecute", "button.execute-move-button", () => {
-        try {
-          if (game.user.isGM) return;
-          const requestId = comaRand();
-
-          globalThis._comaPendingExec.set(game.user.id, {
-            requestId,
-            actorId: actor.id,
-            ts: comaNow()
-          });
-        } catch (e) {
-          comaWarn("execute-move hook failed", e);
-        }
-      });
-    }
-
   } catch (e) {
     console.error(`${MODULE_ID} | renderActorSheet failed`, e);
   }
 });
 
 /* =====================================================================================
- * ROLLDIALOG INJECTION + GM APPROVAL GATE
+ * ROLLDIALOG INJECTION + DESELECT ON CONFIRM (DEFERRED + ON CLOSE)
  * ===================================================================================== */
 function findCustomModifierInput($root) {
+  // Prefer label match
   const labels = $root.find("label").toArray();
   for (const el of labels) {
     const txt = (el.textContent ?? "").trim().toLowerCase();
@@ -831,6 +628,7 @@ function findCustomModifierInput($root) {
       if ($input.length) return $input;
     }
   }
+  // fallback
   const $cand = $root.find('input[type="number"], input[type="text"]').filter((_, i) => i.offsetParent !== null).first();
   return $cand.length ? $cand : null;
 }
@@ -862,11 +660,13 @@ Hooks.on("renderRollDialog", async (app, html) => {
       game.user.character;
     if (!actor) return;
 
+    // Avoid double-inject
     if ($root.find(".com-artifacts-roll").length) return;
 
     const $modInput = findCustomModifierInput($root);
     if (!$modInput || !$modInput.length) return;
 
+    // Base mod per dialog instance
     if (!Number.isFinite(app._comArtifactsBaseMod)) {
       const base = Number($modInput.val() ?? 0);
       app._comArtifactsBaseMod = Number.isFinite(base) ? base : 0;
@@ -906,7 +706,9 @@ Hooks.on("renderRollDialog", async (app, html) => {
 
     function recomputeAndApply() {
       let mod = 0;
-      $panel.find("input.com-approve:checked").each((_, el) => { mod += Number(el.dataset.mod ?? 0); });
+      $panel.find("input.com-approve:checked").each((_, el) => {
+        mod += Number(el.dataset.mod ?? 0);
+      });
 
       $panel.find(".com-artifacts-mod").text(`${mod >= 0 ? "+" : ""}${mod}`);
 
@@ -919,54 +721,45 @@ Hooks.on("renderRollDialog", async (app, html) => {
     recomputeAndApply();
     $panel.on("change", "input.com-approve", recomputeAndApply);
 
-    // GM APPROVAL GATE (only if player clicked EXECUTE MOVE just before this)
+    // Player -> GM mirror request
     if (!game.user.isGM) {
-      const pending = globalThis._comaPendingExec.get(game.user.id);
+      if (!app._comaRequestId) app._comaRequestId = foundry.utils.randomID();
+      globalThis._comaOpenRollDialogs.set(app._comaRequestId, app);
 
-      const isValidPending =
-        pending &&
-        pending.actorId === actor.id &&
-        (comaNow() - Number(pending.ts ?? 0) < 15000);
-
-      if (isValidPending) {
-        globalThis._comaPendingExec.delete(game.user.id);
-
-        app._comaRequestId = pending.requestId;
-        globalThis._comaOpenRollDialogs.set(app._comaRequestId, app);
-
-        comaBlockConfirm(app, $root, "Waiting for GM approval...");
-
-        const gmEntries = entries.map((e, idx) => ({
-          idx,
-          label: e.label,
-          mod: e.mod,
-          checked: true
-        }));
-
-        await comaSendGMApprovalChat({
-          requestId: app._comaRequestId,
-          fromUserId: game.user.id,
-          fromUserName: game.user.name,
-          actorId: actor.id,
-          actorName: actor.name,
-          entries: gmEntries
-        });
-      }
+      game.socket.emit(COMA_SOCKET, {
+        type: "coma-mirror-request",
+        requestId: app._comaRequestId,
+        fromUserId: game.user.id,
+        fromUserName: game.user.name,
+        actorId: actor.id,
+        actorName: actor.name,
+        entries: entries.map((e, idx) => ({ idx, label: e.label, mod: e.mod, checked: true }))
+      });
     }
 
-    // Clear selection after Confirm
+    // ===== CLEAR ARTIFACT SELECTION AFTER CONFIRM (DEFERRED + CLOSE-SAFE) =====
     app._comArtifactsActorId = actor.id;
     app._comArtifactsConfirmed = false;
 
-    const $confirmBtn = comaFindConfirmButton($root);
+    const $confirmBtn =
+      $root.find("button.dialog-button")
+        .filter((_, el) => ((el.textContent ?? "").trim().toLowerCase() === "confirm"))
+        .first();
+
     if ($confirmBtn?.length) {
       $confirmBtn.off("click.comArtifactsClearOnConfirm").on("click.comArtifactsClearOnConfirm", () => {
         app._comArtifactsConfirmed = true;
 
-        setTimeout(() => { try { clearSelAndUnhighlight(actor.id); } catch (_) {} }, 0);
-        setTimeout(() => { try { clearSelAndUnhighlight(actor.id); } catch (_) {} }, 250);
+        setTimeout(() => {
+          try { clearSelAndUnhighlight(actor.id); } catch (_) {}
+        }, 0);
+
+        setTimeout(() => {
+          try { clearSelAndUnhighlight(actor.id); } catch (_) {}
+        }, 250);
       });
     }
+    // ========================================================================
 
   } catch (e) {
     console.error(`${MODULE_ID} | renderRollDialog failed`, e);
@@ -974,12 +767,14 @@ Hooks.on("renderRollDialog", async (app, html) => {
 });
 
 /* =====================================================================================
- * CLEANUP
+ * CLEANUP + FINAL CLEAR ON DIALOG CLOSE (only if confirmed)
  * ===================================================================================== */
 Hooks.on("closeApplication", (app) => {
   try {
+    // GM mirror cleanup map
     if (app?._comaRequestId) globalThis._comaOpenRollDialogs.delete(app._comaRequestId);
 
+    // If this was a RollDialog and player confirmed, clear again (final guarantee)
     if (app?._comArtifactsConfirmed && app?._comArtifactsActorId) {
       try { clearSelAndUnhighlight(app._comArtifactsActorId); } catch (_) {}
     }
