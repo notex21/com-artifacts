@@ -1,11 +1,9 @@
 const MODULE_ID = "com-artifacts";
 
 /* =====================================================================================
- * GM MIRROR (DEBUG-PROOF)
+ * SOCKET: GM MIRROR
  * ===================================================================================== */
 const COMA_SOCKET = `module.${MODULE_ID}`;
-
-// Player: requestId -> RollDialog app
 globalThis._comaOpenRollDialogs ??= new Map();
 
 function comaLog(...a) {
@@ -13,131 +11,107 @@ function comaLog(...a) {
 }
 
 Hooks.once("ready", () => {
-  comaLog("READY on", game.user?.name, "GM?", game.user?.isGM);
+  comaLog("READY", { user: game.user?.name, isGM: game.user?.isGM });
 
   game.socket.on(COMA_SOCKET, (msg) => {
-    if (!msg?.type) return;
+    try {
+      if (!msg?.type) return;
 
-    if (msg.type === "coma-mirror-request" && game.user.isGM) {
-      comaLog("GM received mirror request", msg);
+      // GM receives mirror request -> show dialog
+      if (msg.type === "coma-mirror-request" && game.user.isGM) {
+        const entries = Array.isArray(msg.entries) ? msg.entries : [];
 
-      const entries = Array.isArray(msg.entries) ? msg.entries : [];
-      const content = `
-        <div>
-          <h2 style="margin:0 0 6px 0;">COM-ARTIFACTS GM MIRROR (debug)</h2>
-          <div style="opacity:.85;">
-            <div><strong>From:</strong> ${Handlebars.escapeExpression(msg.fromUserName ?? "")}</div>
-            <div><strong>Actor:</strong> ${Handlebars.escapeExpression(msg.actorName ?? "")}</div>
-            <div><strong>RequestId:</strong> ${Handlebars.escapeExpression(msg.requestId ?? "")}</div>
-            <div><strong>Entries:</strong> ${entries.length}</div>
+        const content = `
+          <div>
+            <div style="opacity:.85; margin-bottom:6px;">
+              <div><strong>From:</strong> ${Handlebars.escapeExpression(msg.fromUserName ?? "")}</div>
+              <div><strong>Actor:</strong> ${Handlebars.escapeExpression(msg.actorName ?? "")}</div>
+            </div>
+
+            <fieldset style="padding:8px; border:1px solid var(--color-border-light-primary); border-radius:6px;">
+              <legend>Artifacts (Mirror)</legend>
+              <div style="display:flex; flex-direction:column; gap:6px; max-height:320px; overflow:auto;">
+                ${
+                  entries.length
+                    ? entries.map((e) => `
+                      <label style="display:flex; align-items:center; gap:8px;">
+                        <input type="checkbox" class="coma-approve" data-idx="${Number(e.idx)}" ${e.checked ? "checked" : ""}/>
+                        <span>${Handlebars.escapeExpression(e.label ?? "")}</span>
+                        <span style="margin-left:auto; opacity:.8;">${Number(e.mod) > 0 ? "+1" : "-1"}</span>
+                      </label>
+                    `).join("")
+                    : `<div style="opacity:.8;">No highlighted artifact tags.</div>`
+                }
+              </div>
+            </fieldset>
           </div>
-          <hr/>
-          <div style="max-height:360px; overflow:auto;">
-            ${
-              entries.length
-                ? entries.map(e => `
-                  <label style="display:flex; gap:8px; align-items:center; margin:6px 0;">
-                    <input type="checkbox" class="coma-approve" data-idx="${Number(e.idx)}" ${e.checked ? "checked" : ""}/>
-                    <span>${Handlebars.escapeExpression(e.label ?? "")}</span>
-                    <span style="margin-left:auto; opacity:.8;">${Number(e.mod) > 0 ? "+1" : "-1"}</span>
-                  </label>
-                `).join("")
-                : `<div style="opacity:.8;">No entries were sent.</div>`
-            }
-          </div>
-        </div>
-      `;
+        `;
 
-      new Dialog({
-        title: "GM Mirror",
-        content,
-        buttons: {
-          apply: {
-            label: "Apply (send back)",
-            callback: (html) => {
-              const el = html?.[0];
-              const checks = Array.from(el.querySelectorAll('input.coma-approve[data-idx]'));
-              const toggles = entries.map(e => {
-                const idx = Number(e.idx);
-                const c = checks.find(x => Number(x.getAttribute("data-idx")) === idx);
-                return { ...e, checked: c ? c.checked : !!e.checked };
-              });
+        new Dialog({
+          title: "Review Tags",
+          content,
+          buttons: {
+            apply: {
+              label: "Approve",
+              callback: (html) => {
+                const root = html?.[0];
+                const checks = Array.from(root.querySelectorAll("input.coma-approve[data-idx]"));
+                const toggles = entries.map((e) => {
+                  const idx = Number(e.idx);
+                  const c = checks.find(x => Number(x.getAttribute("data-idx")) === idx);
+                  return { ...e, checked: c ? c.checked : !!e.checked };
+                });
 
-              game.socket.emit(COMA_SOCKET, {
-                type: "coma-mirror-result",
-                requestId: msg.requestId,
-                toUserId: msg.fromUserId,
-                toggles
-              });
-            }
+                game.socket.emit(COMA_SOCKET, {
+                  type: "coma-mirror-result",
+                  requestId: msg.requestId,
+                  toUserId: msg.fromUserId,
+                  toggles
+                });
+              }
+            },
+            close: { label: "Close" }
           },
-          close: { label: "Close" }
-        },
-        default: "apply"
-      }).render(true);
+          default: "apply"
+        }).render(true);
 
-      return;
-    }
-
-    if (msg.type === "coma-mirror-result" && msg.toUserId === game.user.id) {
-      comaLog("Player received mirror result", msg);
-
-      const app = globalThis._comaOpenRollDialogs.get(msg.requestId);
-      if (!app) return;
-
-      const $root =
-        app?.element ? (app.element.jquery ? app.element : $(app.element)) :
-        null;
-      if (!$root || !$root.length) return;
-
-      const $panel = $root.find(".com-artifacts-roll");
-      if (!$panel.length) return;
-
-      const inputs = $panel.find("input.com-approve").toArray();
-      for (const t of (msg.toggles ?? [])) {
-        const el = inputs[Number(t.idx)];
-        if (!el) continue;
-        const changed = el.checked !== !!t.checked;
-        el.checked = !!t.checked;
-        if (changed) el.dispatchEvent(new Event("change", { bubbles: true }));
+        return;
       }
 
-      if (typeof app._comArtifactsRecompute === "function") {
-        try { app._comArtifactsRecompute(); } catch (_) {}
+      // Player receives result -> apply to their open RollDialog
+      if (msg.type === "coma-mirror-result" && msg.toUserId === game.user.id) {
+        const app = globalThis._comaOpenRollDialogs.get(msg.requestId);
+        if (!app) return;
+
+        const $root =
+          app?.element ? (app.element.jquery ? app.element : $(app.element)) : null;
+        if (!$root?.length) return;
+
+        const $panel = $root.find(".com-artifacts-roll");
+        if (!$panel.length) return;
+
+        const inputs = $panel.find("input.com-approve").toArray();
+        for (const t of (msg.toggles ?? [])) {
+          const el = inputs[Number(t.idx)];
+          if (!el) continue;
+          const changed = el.checked !== !!t.checked;
+          el.checked = !!t.checked;
+          if (changed) el.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+
+        if (typeof app._comArtifactsRecompute === "function") {
+          try { app._comArtifactsRecompute(); } catch (_) {}
+        }
       }
-      return;
+    } catch (e) {
+      console.warn(`${MODULE_ID} | socket handler error`, e);
     }
   });
 });
-Hooks.on("preCreateChatMessage", (doc, data, options, userId) => {
-  try {
-    // Only act on the local player who created the roll
-    if (userId !== game.user.id) return;
 
-    // Only clear if this looks like a City of Mist roll message
-    const content = data.content ?? "";
-    if (typeof content !== "string") return;
-
-    // Heuristic: City of Mist rolls always contain this
-    if (!content.includes("CHANGE THE GAME") &&
-        !content.includes("Make a Roll") &&
-        !content.includes("Roll Bonus")) {
-      return;
-    }
-
-    const actorId = doc.speaker?.actor;
-    if (!actorId) return;
-
-    // Clear selection + UI highlight
-    clearSelAndUnhighlight(actorId);
-
-  } catch (e) {
-    console.warn("com-artifacts | failed to clear after roll", e);
-  }
-});
-
-
-/* -------------------- Client-side selection (per-user, persisted) -------------------- */
+/* =====================================================================================
+ * SELECTION (per-user, persisted on user flags)
+ * ===================================================================================== */
 globalThis.comArtifactsSelection ??= new Map();
 
 function loadSelectionFromUserFlag(actorId) {
@@ -186,10 +160,7 @@ function clearSel(actorId) {
   scheduleSaveSelection(actorId);
 }
 
-/**
- * CLEAR + IMMEDIATE UI UPDATE
- * This removes the yellow highlight on the sheet instantly.
- */
+/** Clears selection AND immediately removes yellow highlight on the open sheet (if any). */
 function clearSelAndUnhighlight(actorId) {
   try {
     clearSel(actorId);
@@ -197,7 +168,6 @@ function clearSelAndUnhighlight(actorId) {
     const actor = game.actors.get(actorId);
     const sheet = actor?.sheet;
 
-    // remove yellow highlight immediately
     if (sheet?.rendered && sheet?.element) {
       const $el = sheet.element.jquery ? sheet.element : $(sheet.element);
       $el.find(".com-tag-pick.com-picked").removeClass("com-picked");
@@ -207,7 +177,9 @@ function clearSelAndUnhighlight(actorId) {
   }
 }
 
-/* -------------------- Storage -------------------- */
+/* =====================================================================================
+ * STORAGE
+ * ===================================================================================== */
 function defaultArtifacts() {
   return [
     {
@@ -235,7 +207,9 @@ async function setArtifacts(actor, artifacts) {
   return actor.setFlag(MODULE_ID, "artifacts", artifacts);
 }
 
-/* -------------------- Tab preservation helpers -------------------- */
+/* =====================================================================================
+ * TAB HELPERS
+ * ===================================================================================== */
 function getActiveTab(html) {
   return html.find('nav.sheet-tabs a.item.active, nav.tabs a.item.active').data("tab");
 }
@@ -248,15 +222,16 @@ function forceActivateTab(app, tab) {
   }, 0);
 }
 
-/* -------------------- Lock-aware editing -------------------- */
+/* =====================================================================================
+ * LOCK-AWARE EDITING
+ * ===================================================================================== */
 function isSheetEditable(html) {
   const ref = html
     .find(`.sheet-body .tab:not([data-tab="${MODULE_ID}"]) input, .sheet-body .tab:not([data-tab="${MODULE_ID}"]) textarea, .sheet-body .tab:not([data-tab="${MODULE_ID}"]) select`)
     .filter((_, el) => el.offsetParent !== null);
 
   if (ref.length) {
-    const anyEnabled = ref.toArray().some(el => !el.disabled);
-    return anyEnabled;
+    return ref.toArray().some(el => !el.disabled);
   }
   return true;
 }
@@ -313,7 +288,9 @@ function installLockObserver(app, html) {
   app._comLockObserver = obs;
 }
 
-/* -------------------- Sheet UI: Add "Artifacts" tab -------------------- */
+/* =====================================================================================
+ * SHEET UI: ARTIFACTS TAB
+ * ===================================================================================== */
 function ensureArtifactsTab(app, html, actor) {
   if (!actor?.testUserPermission(game.user, "OWNER")) return;
 
@@ -358,7 +335,7 @@ function ensureArtifactsTab(app, html, actor) {
     document.head.appendChild(style);
   }
 
-  const nav = html.find('nav.sheet-tabs, nav.tabs');
+  const nav = html.find("nav.sheet-tabs, nav.tabs");
   if (!nav.length) return;
 
   if (nav.find(`a.item[data-tab="${MODULE_ID}"]`).length === 0) {
@@ -425,8 +402,7 @@ function ensureArtifactsTab(app, html, actor) {
     const $pick = $row.find(".com-tag-pick");
     const $store = $row.find("input.com-hidden-store");
     $pick.text(($store.val() ?? "").trim());
-    const el = $pick[0];
-    el.contentEditable = "false";
+    $pick[0].contentEditable = "false";
     $pick.removeClass("com-editing");
   }
 
@@ -436,8 +412,7 @@ function ensureArtifactsTab(app, html, actor) {
     const newVal = (($pick.text() ?? "").trim());
     $store.val(newVal);
     $store.trigger("change");
-    const el = $pick[0];
-    el.contentEditable = "false";
+    $pick[0].contentEditable = "false";
     $pick.removeClass("com-editing");
   }
 
@@ -454,12 +429,8 @@ function ensureArtifactsTab(app, html, actor) {
           <span class="com-tag-pick ${isWeak ? "com-weak" : ""}" data-pick="${pickKey}" style="${hasValue ? "" : "display:none;"}">
             ${Handlebars.escapeExpression(label)}
           </span>
-
           <button type="button" class="com-edit-tag" title="${hasValue ? "Edit" : "Add"}">✎</button>
-
-          <input class="com-editor-only com-hidden-store" type="text" data-field="${field}"
-            value="${Handlebars.escapeExpression(value ?? "")}"
-          />
+          <input class="com-editor-only com-hidden-store" type="text" data-field="${field}" value="${Handlebars.escapeExpression(value ?? "")}" />
         </div>
       `;
     };
@@ -467,43 +438,46 @@ function ensureArtifactsTab(app, html, actor) {
     const renderSlot = (a, idx) => {
       const imgStyle = a.img ? `style="background-image:url('${a.img.replace(/'/g, "%27")}')"` : "";
       return `
-      <section class="com-artifact" data-idx="${idx}">
-        <header>
-          <div class="img" ${imgStyle}></div>
-          <div class="name" style="flex:1">
-            <label>Artifact Name</label>
-            <input class="com-editor-only" type="text" data-field="name" value="${Handlebars.escapeExpression(a.name ?? "")}" />
+        <section class="com-artifact" data-idx="${idx}">
+          <header>
+            <div class="img" ${imgStyle}></div>
+            <div class="name" style="flex:1">
+              <label>Artifact Name</label>
+              <input class="com-editor-only" type="text" data-field="name" value="${Handlebars.escapeExpression(a.name ?? "")}" />
+            </div>
+          </header>
+
+          <div class="controls">
+            <button type="button" class="com-pick-img"><i class="fas fa-image"></i> Image</button>
+            <button type="button" class="com-clear-img"><i class="fas fa-trash"></i> Clear</button>
           </div>
-        </header>
 
-        <div class="controls">
-          <button type="button" class="com-pick-img"><i class="fas fa-image"></i> Image</button>
-          <button type="button" class="com-clear-img"><i class="fas fa-trash"></i> Clear</button>
-        </div>
+          <div class="tags">
+            <label>Power Tags (click to mark)</label>
 
-        <div class="tags">
-          <label>Power Tags (click to mark)</label>
+            ${renderTagRow({ pickKey: `a${idx}.p0`, isWeak: false, field: "power.0.name", value: a.power?.[0]?.name ?? "" })}
+            ${renderTagRow({ pickKey: `a${idx}.p1`, isWeak: false, field: "power.1.name", value: a.power?.[1]?.name ?? "" })}
 
-          ${renderTagRow({ pickKey: `a${idx}.p0`, isWeak: false, field: "power.0.name", value: a.power?.[0]?.name ?? "" })}
-          ${renderTagRow({ pickKey: `a${idx}.p1`, isWeak: false, field: "power.1.name", value: a.power?.[1]?.name ?? "" })}
+            <label style="margin-top:8px; display:block;">Weakness Tag (click to mark)</label>
 
-          <label style="margin-top:8px; display:block;">Weakness Tag (click to mark)</label>
+            ${renderTagRow({ pickKey: `a${idx}.w`, isWeak: true, field: "weakness.name", value: a.weakness?.name ?? "" })}
+          </div>
 
-          ${renderTagRow({ pickKey: `a${idx}.w`, isWeak: true, field: "weakness.name", value: a.weakness?.name ?? "" })}
-        </div>
-
-        <div class="hint">Click tag names to highlight. Highlighted tags appear in Make Roll for MC approval.</div>
-      </section>`;
+          <div class="hint">Click tag names to highlight. Highlighted tags appear in Make Roll for MC approval.</div>
+        </section>
+      `;
     };
 
     grid.html(artifacts.map(renderSlot).join(""));
 
+    // restore highlight from selection
     const s = getSel(actor.id);
     grid.find(".com-tag-pick").each((_, el) => {
       const key = el.dataset.pick;
       if (s.has(key)) $(el).addClass("com-picked");
     });
 
+    // click-to-highlight
     grid.off("click.comArtifactsPick").on("click.comArtifactsPick", ".com-tag-pick", (ev) => {
       if ($(ev.currentTarget).hasClass("com-editing")) return;
       const key = ev.currentTarget.dataset.pick;
@@ -511,6 +485,7 @@ function ensureArtifactsTab(app, html, actor) {
       $(ev.currentTarget).toggleClass("com-picked", set.has(key));
     });
 
+    // edit button
     grid.off("click.comArtifactsEdit").on("click.comArtifactsEdit", ".com-edit-tag", (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
@@ -523,6 +498,7 @@ function ensureArtifactsTab(app, html, actor) {
       syncTagRowUI($row, true);
     });
 
+    // key handling while editing
     grid.off("keydown.comArtifactsInline").on("keydown.comArtifactsInline", ".com-tag-pick.com-editing", (ev) => {
       const $row = $(ev.currentTarget).closest(".tag-row");
 
@@ -545,6 +521,7 @@ function ensureArtifactsTab(app, html, actor) {
       }
     });
 
+    // blur saves
     grid.off("blur.comArtifactsInline").on("blur.comArtifactsInline", ".com-tag-pick.com-editing", (ev) => {
       const $row = $(ev.currentTarget).closest(".tag-row");
       commitInlineEdit($row);
@@ -552,6 +529,7 @@ function ensureArtifactsTab(app, html, actor) {
       syncTagRowUI($row, editable);
     });
 
+    // save changes
     grid.off("change.comArtifacts").on("change.comArtifacts", "input", async (ev) => {
       const tab = getActiveTab(html) || MODULE_ID;
       app._comLastTab = tab;
@@ -566,7 +544,6 @@ function ensureArtifactsTab(app, html, actor) {
       let ref = artifacts2[idx];
       for (let i = 0; i < path.length - 1; i++) ref = ref[path[i]];
       const lastKey = path[path.length - 1];
-
       ref[lastKey] = ev.currentTarget.value;
 
       const $section = $(section);
@@ -582,6 +559,7 @@ function ensureArtifactsTab(app, html, actor) {
       setArtifactsEditable(html, editable);
     });
 
+    // image pick/clear
     grid.off("click.comArtifactsImg").on("click.comArtifactsImg", ".com-pick-img", async (ev) => {
       const tab = getActiveTab(html) || MODULE_ID;
       app._comLastTab = tab;
@@ -618,7 +596,6 @@ function ensureArtifactsTab(app, html, actor) {
     const editable = isSheetEditable(html);
     setArtifactsEditable(html, editable);
     installLockObserver(app, html);
-
     grid.find(".tag-row").each((_, rowEl) => syncTagRowUI($(rowEl), editable));
   })();
 }
@@ -641,8 +618,11 @@ Hooks.on("renderActorSheet", (app, html) => {
   installLockObserver(app, $html);
 });
 
-/* -------------------- RollDialog injection -------------------- */
+/* =====================================================================================
+ * ROLLDIALOG INJECTION
+ * ===================================================================================== */
 function findCustomModifierInput($root) {
+  // Prefer label match
   const labels = $root.find("label").toArray();
   for (const el of labels) {
     const txt = (el.textContent ?? "").trim().toLowerCase();
@@ -652,6 +632,7 @@ function findCustomModifierInput($root) {
       if ($input.length) return $input;
     }
   }
+  // fallback
   const $cand = $root.find('input[type="number"], input[type="text"]').filter((_, i) => i.offsetParent !== null).first();
   return $cand.length ? $cand : null;
 }
@@ -683,15 +664,13 @@ Hooks.on("renderRollDialog", async (app, html) => {
       game.user.character;
     if (!actor) return;
 
-    // Mark this dialog instance
-    app._comActorId = actor.id;
-    app._comIsRollDialog = true;
-
+    // Avoid double-inject
     if ($root.find(".com-artifacts-roll").length) return;
 
     const $modInput = findCustomModifierInput($root);
     if (!$modInput || !$modInput.length) return;
 
+    // Base mod per dialog instance
     if (!Number.isFinite(app._comArtifactsBaseMod)) {
       const base = Number($modInput.val() ?? 0);
       app._comArtifactsBaseMod = Number.isFinite(base) ? base : 0;
@@ -731,8 +710,12 @@ Hooks.on("renderRollDialog", async (app, html) => {
 
     function recomputeAndApply() {
       let mod = 0;
-      $panel.find("input.com-approve:checked").each((_, el) => (mod += Number(el.dataset.mod ?? 0)));
+      $panel.find("input.com-approve:checked").each((_, el) => {
+        mod += Number(el.dataset.mod ?? 0);
+      });
+
       $panel.find(".com-artifacts-mod").text(`${mod >= 0 ? "+" : ""}${mod}`);
+
       $modInput.val((app._comArtifactsBaseMod ?? 0) + mod);
       $modInput.trigger("input");
       $modInput.trigger("change");
@@ -742,28 +725,7 @@ Hooks.on("renderRollDialog", async (app, html) => {
     recomputeAndApply();
     $panel.on("change", "input.com-approve", recomputeAndApply);
 
-    // IMPORTANT: DESELECT RIGHT WHEN PLAYER PRESSES CONFIRM
-    // CoM sometimes doesn't submit the form, so we hook the button click by label/class/data-button.
-    $root.off("click.comArtifactsConfirm").on("click.comArtifactsConfirm", "button", (ev) => {
-      if (game.user.isGM) return;
-
-      const $btn = $(ev.currentTarget);
-      const label = ($btn.text() ?? "").trim().toLowerCase();
-      const dataBtn = ($btn.data("button") ?? "").toString().toLowerCase();
-
-      const isConfirm =
-        $btn.hasClass("confirm") ||
-        dataBtn === "confirm" ||
-        label === "confirm" ||
-        label.includes("confirm");
-
-      if (!isConfirm) return;
-
-      // Clear selection + remove yellow highlight immediately
-      clearSelAndUnhighlight(actor.id);
-    });
-
-    // Keep your mirror emit (unchanged)
+    // Send mirror request to GM (player side only)
     if (!game.user.isGM) {
       if (!app._comaRequestId) app._comaRequestId = foundry.utils.randomID();
       globalThis._comaOpenRollDialogs.set(app._comaRequestId, app);
@@ -780,21 +742,41 @@ Hooks.on("renderRollDialog", async (app, html) => {
     }
 
   } catch (e) {
-    console.error("com-artifacts | renderRollDialog failed", e);
+    console.error(`${MODULE_ID} | renderRollDialog failed`, e);
   }
 });
 
-/* -------------------- Cleanup -------------------- */
-Hooks.on("closeApplication", (app) => {
-  // cleanup player map
-  if (app?._comaRequestId) {
-    globalThis._comaOpenRollDialogs.delete(app._comaRequestId);
-  }
-
-  // fallback: if dialog closes without our confirm click, still clear
+/* =====================================================================================
+ * DESELECT FIX (CORRECT): clear selection ONLY when the roll chat message is created
+ * ===================================================================================== */
+Hooks.on("preCreateChatMessage", (doc, data, options, userId) => {
   try {
-    if (app?._comIsRollDialog && app?._comActorId && !game.user.isGM) {
-      clearSelAndUnhighlight(app._comActorId);
-    }
+    // only the client that is creating the message (the rolling player)
+    if (userId !== game.user.id) return;
+
+    const speaker = data.speaker ?? doc.speaker;
+    const actorId = speaker?.actor;
+    if (!actorId) return;
+
+    // only clear if this actor currently has any artifact selection
+    const s = getSel(actorId);
+    if (!s || s.size === 0) return;
+
+    // CoM roll messages come with HTML content; we don't rely on exact strings,
+    // we just clear on "any message created by this user while selection is active".
+    clearSelAndUnhighlight(actorId);
+
+  } catch (e) {
+    console.warn(`${MODULE_ID} | preCreateChatMessage deselect failed`, e);
+  }
+});
+
+/* =====================================================================================
+ * CLEANUP ONLY (no deselect here)
+ * ===================================================================================== */
+Hooks.on("closeApplication", (app) => {
+  try {
+    if (app?._comaRequestId) globalThis._comaOpenRollDialogs.delete(app._comaRequestId);
   } catch (_) {}
 });
+
