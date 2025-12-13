@@ -116,11 +116,6 @@ Hooks.once("ready", () => {
   });
 });
 
-Hooks.on("closeApplication", (app) => {
-  if (!app?._comaRequestId) return;
-  globalThis._comaOpenRollDialogs.delete(app._comaRequestId);
-});
-
 /* -------------------- Client-side selection (per-user, persisted) -------------------- */
 globalThis.comArtifactsSelection ??= new Map();
 
@@ -646,6 +641,10 @@ Hooks.on("renderRollDialog", async (app, html) => {
       game.user.character;
     if (!actor) return;
 
+    // === NEW: mark dialog so we can clear selection after roll
+    app._comActorId = actor.id;
+    app._comIsRollDialog = true;
+
     if ($root.find(".com-artifacts-roll").length) return;
 
     const $modInput = findCustomModifierInput($root);
@@ -695,6 +694,28 @@ Hooks.on("renderRollDialog", async (app, html) => {
       $modInput.val((app._comArtifactsBaseMod ?? 0) + mod);
       $modInput.trigger("input");
       $modInput.trigger("change");
+
+      // === NEW: build artifact summary for chat relabel
+      try {
+        const parts = [];
+        $panel.find("label").each((_, lab) => {
+          const $lab = $(lab);
+          const $cb = $lab.find("input.com-approve");
+          if (!$cb.length) return;
+          if (!$cb.prop("checked")) return;
+
+          const label = ($lab.find("span").first().text() ?? "").trim();
+          const m = Number($cb.attr("data-mod") ?? 0);
+          if (!label) return;
+          parts.push(`${label} (${m >= 0 ? "+" : ""}${m})`);
+        });
+
+        const summary = parts.length ? `Artifacts: ${parts.join(", ")}` : "Artifacts";
+        app._comArtifactChatLabel = summary;
+
+        globalThis._comLastArtifactChatLabelByUser ??= {};
+        globalThis._comLastArtifactChatLabelByUser[game.user.id] = { summary, ts: Date.now() };
+      } catch (_) {}
     }
 
     app._comArtifactsRecompute = recomputeAndApply;
@@ -720,10 +741,52 @@ Hooks.on("renderRollDialog", async (app, html) => {
     }
 
     $mount.off("submit.comArtifacts").on("submit.comArtifacts", () => {
+      // Keep this (optional): clears after submit as well
       clearSel(actor.id);
     });
 
   } catch (e) {
     console.error("com-artifacts | renderRollDialog failed", e);
   }
+});
+
+/* =====================================================================================
+ * NEW: clear artifact selections after the roll dialog closes (after approval/roll)
+ * ===================================================================================== */
+Hooks.on("closeApplication", (app) => {
+  // cleanup player map
+  if (app?._comaRequestId) {
+    globalThis._comaOpenRollDialogs.delete(app._comaRequestId);
+  }
+
+  // Clear selection when the roll dialog closes (player-side)
+  try {
+    if (app?._comIsRollDialog && app?._comActorId && !game.user.isGM) {
+      clearSel(app._comActorId);
+    }
+  } catch (_) {}
+});
+
+/* =====================================================================================
+ * NEW: Chat relabel - replace "Custom Modifier" with "Artifacts: ..."
+ * ===================================================================================== */
+Hooks.on("preCreateChatMessage", (doc, data, options, userId) => {
+  try {
+    const authorId = data.user ?? userId;
+    if (authorId !== game.user.id) return;
+
+    const cache = globalThis._comLastArtifactChatLabelByUser?.[game.user.id];
+    if (!cache) return;
+
+    if ((Date.now() - (cache.ts ?? 0)) > 8000) return;
+
+    const content = data.content;
+    if (typeof content !== "string") return;
+
+    const replaced = content.replace(/Custom Modifier/gi, cache.summary);
+    if (replaced !== content) {
+      data.content = replaced;
+      delete globalThis._comLastArtifactChatLabelByUser[game.user.id];
+    }
+  } catch (_) {}
 });
