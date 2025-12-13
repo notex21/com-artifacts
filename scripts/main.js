@@ -31,176 +31,199 @@ Hooks.once("ready", () => {
     try {
       if (!msg?.type) return;
 
-      /* ----------------------------- GM: ARTIFACT REVIEW ----------------------------- */
-      if (msg.type === "coma-approval-artifacts-request" && game.user.isGM) {
-        const entries = Array.isArray(msg.entries) ? msg.entries : [];
-        const artifactsMeta = Array.isArray(msg.artifactsMeta) ? msg.artifactsMeta : [];
+// --- GM: ARTIFACT REVIEW (SAFE RENDER) ---
+if (msg.type === "coma-approval-artifacts-request" && game.user.isGM) {
+  const entries = Array.isArray(msg.entries) ? msg.entries : [];
+  const artifactsMeta = Array.isArray(msg.artifactsMeta) ? msg.artifactsMeta : [];
 
-        // Render weakness toggles per artifact where any power from that artifact is selected
-        const powerSelectedByArtifact = new Map(); // idx -> true
-        for (const e of entries) {
-          if (e?.kind === "artifact-power" && Number.isFinite(e.artifactIdx)) {
-            powerSelectedByArtifact.set(Number(e.artifactIdx), true);
+  const powerSelectedByArtifact = new Map();
+  for (const e of entries) {
+    if (e?.kind === "artifact-power" && Number.isFinite(e.artifactIdx)) {
+      powerSelectedByArtifact.set(Number(e.artifactIdx), true);
+    }
+  }
+
+  const weaknessBlocks = artifactsMeta
+    .filter(m => powerSelectedByArtifact.get(Number(m.artifactIdx)))
+    .map(m => {
+      const wLabel = (m.weaknessLabel ?? "").trim();
+      if (!wLabel) return "";
+      return `
+        <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
+          <input type="checkbox" class="coma-art-weak" data-artifact-idx="${Number(m.artifactIdx)}" />
+          <span><strong>Add weakness:</strong> ${esc(wLabel)}</span>
+          <span style="margin-left:auto; opacity:.8;">-1</span>
+        </label>
+      `;
+    })
+    .join("");
+
+  const content = `
+    <div>
+      <div style="opacity:.85; margin-bottom:6px;">
+        <div><strong>From:</strong> ${esc(msg.fromUserName ?? "")}</div>
+        <div><strong>Actor:</strong> ${esc(msg.actorName ?? "")}</div>
+      </div>
+
+      <fieldset style="padding:8px; border:1px solid var(--color-border-light-primary); border-radius:6px;">
+        <legend>Artifacts (GM Review)</legend>
+
+        <div style="display:flex; flex-direction:column; gap:6px; max-height:320px; overflow:auto;">
+          ${
+            entries.length
+              ? entries.map((e) => `
+                <label style="display:flex; align-items:center; gap:8px;">
+                  <input type="checkbox" class="coma-approve-art" data-idx="${Number(e.idx)}" ${e.checked ? "checked" : ""}/>
+                  <span>${esc(e.label ?? "")}</span>
+                  <span style="margin-left:auto; opacity:.8;">${Number(e.mod) > 0 ? "+1" : "-1"}</span>
+                </label>
+              `).join("")
+              : `<div style="opacity:.8;">No artifact tags requested.</div>`
           }
-        }
+        </div>
 
-        const weaknessBlocks = artifactsMeta
-          .filter(m => powerSelectedByArtifact.get(Number(m.artifactIdx)))
-          .map(m => {
-            const wLabel = (m.weaknessLabel ?? "").trim();
-            if (!wLabel) return "";
-            return `
-              <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
-                <input type="checkbox" class="coma-art-weak" data-artifact-idx="${Number(m.artifactIdx)}" />
-                <span><strong>Add weakness:</strong> ${esc(wLabel)}</span>
-                <span style="margin-left:auto; opacity:.8;">-1</span>
-              </label>
-            `;
-          })
-          .join("");
+        ${weaknessBlocks ? `<hr style="opacity:.35; margin:8px 0;">${weaknessBlocks}` : ``}
+      </fieldset>
+    </div>
+  `;
 
-        const content = `
-          <div>
-            <div style="opacity:.85; margin-bottom:6px;">
-              <div><strong>From:</strong> ${esc(msg.fromUserName ?? "")}</div>
-              <div><strong>Actor:</strong> ${esc(msg.actorName ?? "")}</div>
-            </div>
+  // Defer creation/render so other app errors don't swallow this call stack
+  setTimeout(() => {
+    try {
+      const d = new Dialog({
+        title: "Review: Artifacts",
+        content,
+        buttons: {
+          apply: {
+            label: "Confirm",
+            callback: (html) => {
+              const root = html?.[0];
+              const checks = Array.from(root.querySelectorAll("input.coma-approve-art[data-idx]"));
 
-            <fieldset style="padding:8px; border:1px solid var(--color-border-light-primary); border-radius:6px;">
-              <legend>Artifacts (GM Review)</legend>
+              const toggles = entries.map((e) => {
+                const idx = Number(e.idx);
+                const c = checks.find(x => Number(x.getAttribute("data-idx")) === idx);
+                return { ...e, checked: c ? c.checked : !!e.checked };
+              });
 
-              <div style="display:flex; flex-direction:column; gap:6px; max-height:320px; overflow:auto;">
-                ${
-                  entries.length
-                    ? entries.map((e) => `
-                      <label style="display:flex; align-items:center; gap:8px;">
-                        <input type="checkbox" class="coma-approve-art" data-idx="${Number(e.idx)}" ${e.checked ? "checked" : ""}/>
-                        <span>${esc(e.label ?? "")}</span>
-                        <span style="margin-left:auto; opacity:.8;">${Number(e.mod) > 0 ? "+1" : "-1"}</span>
-                      </label>
-                    `).join("")
-                    : `<div style="opacity:.8;">No artifact tags requested.</div>`
-                }
-              </div>
+              const weakChecks = Array.from(root.querySelectorAll("input.coma-art-weak[data-artifact-idx]"));
+              const addWeaknessFor = weakChecks
+                .filter(c => c.checked)
+                .map(c => Number(c.getAttribute("data-artifact-idx")));
 
-              ${weaknessBlocks ? `<hr style="opacity:.35; margin:8px 0;">${weaknessBlocks}` : ``}
-            </fieldset>
-          </div>
-        `;
-
-        const d = new Dialog({
-          title: "Review: Artifacts",
-          content,
-          buttons: {
-            apply: {
-              label: "Confirm",
-              callback: (html) => {
-                const root = html?.[0];
-                const checks = Array.from(root.querySelectorAll("input.coma-approve-art[data-idx]"));
-
-                const toggles = entries.map((e) => {
-                  const idx = Number(e.idx);
-                  const c = checks.find(x => Number(x.getAttribute("data-idx")) === idx);
-                  return { ...e, checked: c ? c.checked : !!e.checked };
-                });
-
-                // Weakness adds: map artifactIdx -> true
-                const weakChecks = Array.from(root.querySelectorAll("input.coma-art-weak[data-artifact-idx]"));
-                const addWeaknessFor = weakChecks
-                  .filter(c => c.checked)
-                  .map(c => Number(c.getAttribute("data-artifact-idx")));
-
-                game.socket.emit(COMA_SOCKET, {
-                  type: "coma-approval-artifacts-result",
-                  requestId: msg.requestId,
-                  toUserId: msg.fromUserId,
-                  toggles,
-                  addWeaknessFor
-                });
-              }
-            },
-            close: { label: "Close" }
+              game.socket.emit(COMA_SOCKET, {
+                type: "coma-approval-artifacts-result",
+                requestId: msg.requestId,
+                toUserId: msg.fromUserId,
+                toggles,
+                addWeaknessFor
+              });
+            }
           },
-          default: "apply",
-          render: (html) => {
-            try {
-              // first GM review dialog becomes anchor
-              const app = html?.closest?.(".app")?.data?.("app") ?? null;
-              if (app?.position) globalThis._comaGMReviewAnchor = { ...app.position };
-            } catch (_) {}
+          close: { label: "Close" }
+        },
+        default: "apply"
+      });
+
+      d.render(true);
+
+      // After render: bring to top + store anchor safely
+      setTimeout(() => {
+        try {
+          d.bringToTop?.();
+          if (d.position) globalThis._comaGMReviewAnchor = { ...d.position };
+        } catch (_) {}
+      }, 50);
+
+    } catch (e) {
+      console.warn(`${MODULE_ID} | GM artifacts review dialog failed`, e);
+    }
+  }, 0);
+
+  return;
+}
+
+// --- GM: NORMAL REVIEW (SAFE RENDER) ---
+if (msg.type === "coma-approval-normal-request" && game.user.isGM) {
+  const entries = Array.isArray(msg.entries) ? msg.entries : [];
+
+  const content = `
+    <div>
+      <div style="opacity:.85; margin-bottom:6px;">
+        <div><strong>From:</strong> ${esc(msg.fromUserName ?? "")}</div>
+        <div><strong>Actor:</strong> ${esc(msg.actorName ?? "")}</div>
+      </div>
+
+      <fieldset style="padding:8px; border:1px solid var(--color-border-light-primary); border-radius:6px;">
+        <legend>Normal Tags (GM Review)</legend>
+        <div style="display:flex; flex-direction:column; gap:6px; max-height:320px; overflow:auto;">
+          ${
+            entries.length
+              ? entries.map((e) => `
+                <label style="display:flex; align-items:center; gap:8px;">
+                  <input type="checkbox" class="coma-approve-norm" data-idx="${Number(e.idx)}" ${e.checked ? "checked" : ""}/>
+                  <span>${esc(e.label ?? "")}</span>
+                  <span style="margin-left:auto; opacity:.8;">${Number(e.mod) > 0 ? "+1" : "-1"}</span>
+                </label>
+              `).join("")
+              : `<div style="opacity:.8;">No normal tags detected.</div>`
           }
-        });
+        </div>
+      </fieldset>
+    </div>
+  `;
 
-        d.render(true);
+  setTimeout(() => {
+    try {
+      const d = new Dialog({
+        title: "Review: Normal Tags",
+        content,
+        buttons: {
+          apply: {
+            label: "Confirm",
+            callback: (html) => {
+              const root = html?.[0];
+              const checks = Array.from(root.querySelectorAll("input.coma-approve-norm[data-idx]"));
+              const toggles = entries.map((e) => {
+                const idx = Number(e.idx);
+                const c = checks.find(x => Number(x.getAttribute("data-idx")) === idx);
+                return { ...e, checked: c ? c.checked : !!e.checked };
+              });
 
-        // Best-effort: anchor after render, then position next dialogs to the right
-        setTimeout(() => {
-          try {
-            const app = d;
-            if (app?.position) globalThis._comaGMReviewAnchor = { ...app.position };
-          } catch (_) {}
-        }, 0);
-
-        return;
-      }
-
-      /* ------------------------------ GM: NORMAL REVIEW ------------------------------ */
-      if (msg.type === "coma-approval-normal-request" && game.user.isGM) {
-        const entries = Array.isArray(msg.entries) ? msg.entries : [];
-
-        const content = `
-          <div>
-            <div style="opacity:.85; margin-bottom:6px;">
-              <div><strong>From:</strong> ${esc(msg.fromUserName ?? "")}</div>
-              <div><strong>Actor:</strong> ${esc(msg.actorName ?? "")}</div>
-            </div>
-
-            <fieldset style="padding:8px; border:1px solid var(--color-border-light-primary); border-radius:6px;">
-              <legend>Normal Tags (GM Review)</legend>
-              <div style="display:flex; flex-direction:column; gap:6px; max-height:320px; overflow:auto;">
-                ${
-                  entries.length
-                    ? entries.map((e) => `
-                      <label style="display:flex; align-items:center; gap:8px;">
-                        <input type="checkbox" class="coma-approve-norm" data-idx="${Number(e.idx)}" ${e.checked ? "checked" : ""}/>
-                        <span>${esc(e.label ?? "")}</span>
-                        <span style="margin-left:auto; opacity:.8;">${Number(e.mod) > 0 ? "+1" : "-1"}</span>
-                      </label>
-                    `).join("")
-                    : `<div style="opacity:.8;">No normal tags detected.</div>`
-                }
-              </div>
-            </fieldset>
-          </div>
-        `;
-
-        const d = new Dialog({
-          title: "Review: Normal Tags",
-          content,
-          buttons: {
-            apply: {
-              label: "Confirm",
-              callback: (html) => {
-                const root = html?.[0];
-                const checks = Array.from(root.querySelectorAll("input.coma-approve-norm[data-idx]"));
-                const toggles = entries.map((e) => {
-                  const idx = Number(e.idx);
-                  const c = checks.find(x => Number(x.getAttribute("data-idx")) === idx);
-                  return { ...e, checked: c ? c.checked : !!e.checked };
-                });
-
-                game.socket.emit(COMA_SOCKET, {
-                  type: "coma-approval-normal-result",
-                  requestId: msg.requestId,
-                  toUserId: msg.fromUserId,
-                  toggles
-                });
-              }
-            },
-            close: { label: "Close" }
+              game.socket.emit(COMA_SOCKET, {
+                type: "coma-approval-normal-result",
+                requestId: msg.requestId,
+                toUserId: msg.fromUserId,
+                toggles
+              });
+            }
           },
-          default: "apply"
-        });
+          close: { label: "Close" }
+        },
+        default: "apply"
+      });
+
+      d.render(true);
+
+      setTimeout(() => {
+        try {
+          d.bringToTop?.();
+          // place next to anchor if we have one
+          if (globalThis._comaGMReviewAnchor?.left != null) {
+            const a = globalThis._comaGMReviewAnchor;
+            d.setPosition?.({ left: a.left + (a.width ?? 380) + 10, top: a.top });
+          }
+        } catch (_) {}
+      }, 60);
+
+    } catch (e) {
+      console.warn(`${MODULE_ID} | GM normal review dialog failed`, e);
+    }
+  }, 0);
+
+  return;
+}
+
 
         d.render(true);
 
