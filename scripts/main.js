@@ -218,9 +218,10 @@ function forceActivateTab(app, tab) {
 }
 
 /* =====================================================================================
- * LOCK-AWARE EDITING
+ * LOCK DETECTION (system sheet lock)
  * ===================================================================================== */
-function isSheetEditable(html) {
+function isSheetUnlocked(html) {
+  // Your existing robust method: if other tabs have enabled inputs -> unlocked
   const ref = html
     .find(`.sheet-body .tab:not([data-tab="${MODULE_ID}"]) input, .sheet-body .tab:not([data-tab="${MODULE_ID}"]) textarea, .sheet-body .tab:not([data-tab="${MODULE_ID}"]) select`)
     .filter((_, el) => el.offsetParent !== null);
@@ -229,78 +230,20 @@ function isSheetEditable(html) {
   return true;
 }
 
-function setArtifactsEditable(html, editable) {
-  const tab = html.find(`.sheet-body .tab[data-tab="${MODULE_ID}"]`);
-  if (!tab.length) return;
-
-  // Name: show input only when editable; show styled display only when locked
-  tab.find(".com-name-input").prop("disabled", !editable).toggle(!!editable);
-  tab.find(".com-name-display").toggle(!editable);
-
-  // Tag editing store fields only in editable mode
-  tab.find(".com-editor-only").prop("disabled", !editable).toggle(!!editable);
-
-  // Image pick only in editable mode
-  tab.find(".com-artifact-img").toggleClass("com-img-disabled", !editable);
-
-  // Tags: in locked mode hide empty tags entirely (you can only pick real tags)
-  tab.find(".com-tag-pick").each((_, el) => {
-    const $el = $(el);
-    const empty = $el.attr("data-empty") === "1";
-    const editing = $el.hasClass("com-editing");
-    if (!editable) {
-      el.contentEditable = "false";
-      $el.removeClass("com-editing");
-      $el.toggle(!empty); // hide empties when locked
-      if (empty) $el.removeClass("com-picked");
-    } else {
-      $el.show(); // show all in edit mode (empties show as "(empty)")
-      if (!editing) el.contentEditable = "false";
-    }
-  });
-
-  // Always allow clicking visible tags for pick/unpick
-  tab.find(".com-tag-pick").css("pointer-events", "auto");
-
-  tab.css("opacity", editable ? "" : "0.90");
-}
-
-function installLockObserver(app, html) {
-  if (app._comLockObserverInstalled) return;
-  app._comLockObserverInstalled = true;
-
-  const root = html?.[0];
-  if (!root) return;
-
-  const obs = new MutationObserver(() => {
-    try {
-      const $root = $(root);
-      const editable = isSheetEditable($root);
-      setArtifactsEditable($root, editable);
-    } catch (_) {}
-  });
-
-  obs.observe(root, { attributes: true, childList: true, subtree: true });
-  app._comLockObserver = obs;
-}
-
 /* =====================================================================================
  * SHEET UI: ARTIFACTS TAB
  * ===================================================================================== */
 function ensureArtifactsTab(app, html, actor) {
   if (!actor?.testUserPermission(game.user, "OWNER")) return;
 
+  // per-sheet edit state: one button per artifact card
+  app._comArtifactEdit ??= [false, false];
+
   if (!document.getElementById("com-artifacts-inline-style")) {
     const style = document.createElement("style");
     style.id = "com-artifacts-inline-style";
-
-    // Matches requested look:
-    // - big centered square image
-    // - name above image (purple, 1.5x) when locked
-    // - purple boxes same width as image
-    // - no edit buttons
     style.textContent = `
-      .com-artifacts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      .com-artifacts-grid { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 
       .com-artifact {
         border: 1px solid var(--color-border-light-primary);
@@ -308,7 +251,28 @@ function ensureArtifactsTab(app, html, actor) {
         padding: 12px;
       }
 
-      .com-artifact .com-center { display:flex; flex-direction:column; align-items:center; gap:10px; }
+      .com-artifact .com-topbar{
+        display:flex;
+        align-items:center;
+        justify-content:flex-end;
+        margin-bottom: 6px;
+      }
+
+      .com-artifact .com-edit-toggle{
+        background: rgba(120, 80, 160, .12);
+        border: 1px solid rgba(120, 80, 160, .55);
+        border-radius: 8px;
+        padding: 3px 10px;
+        cursor:pointer;
+        font-size: 12px;
+        color: var(--color-text-hyperlink);
+        display:inline-flex;
+        align-items:center;
+        gap:6px;
+      }
+      .com-artifact .com-edit-toggle[disabled]{ opacity:.55; cursor:default; }
+
+      .com-center { display:flex; flex-direction:column; align-items:center; gap:10px; }
 
       /* Name */
       .com-name-display{
@@ -319,6 +283,7 @@ function ensureArtifactsTab(app, html, actor) {
         line-height: 1.1;
         max-width: 100%;
         word-break: break-word;
+        margin-top: 2px;
       }
 
       .com-name-input{
@@ -334,13 +299,14 @@ function ensureArtifactsTab(app, html, actor) {
         border-radius: 10px;
         background-size: cover;
         background-position: center;
-        background-repeat: no-repeat;
+        background-repeat:no-repeat;
         display:flex;
         align-items:center;
         justify-content:center;
-        cursor: pointer;
         user-select:none;
       }
+      .com-artifact-img.com-img-clickable{ cursor:pointer; }
+      .com-artifact-img.com-img-disabled{ cursor:default; opacity:.85; }
 
       .com-artifact-img .com-img-ph{
         font-size: 42px;
@@ -348,12 +314,7 @@ function ensureArtifactsTab(app, html, actor) {
         color: var(--color-text-hyperlink);
       }
 
-      .com-artifact-img.com-img-disabled{
-        cursor: default;
-        opacity: .85;
-      }
-
-      /* Purple areas like the Image/Clear button style */
+      /* Purple areas */
       .com-tag-box{
         width: 192px;
         border-radius: 10px;
@@ -384,29 +345,30 @@ function ensureArtifactsTab(app, html, actor) {
         gap: 8px;
         padding: 4px 10px;
         border-radius: 10px;
-        cursor:pointer;
         user-select:none;
         border: 1px solid transparent;
         max-width: 100%;
       }
 
-      .com-tag-pick:hover{
+      /* Non-edit mode: clickable for select/deselect */
+      .com-tag-pick.com-pickable{ cursor:pointer; }
+      .com-tag-pick.com-pickable:hover{
         border-color: rgba(120, 80, 160, .45);
         box-shadow: 0 0 0 2px rgba(120, 80, 160, .12);
       }
 
+      /* Edit mode: editable text UI */
+      .com-tag-pick.com-editable{
+        cursor:text;
+        border-color: rgba(120, 80, 160, .35);
+        background: rgba(255,255,255,.35);
+      }
+
       .com-tag-pick .com-tag-icon{ opacity: .9; }
-      .com-tag-pick .com-tag-text{ display:inline-block; }
+      .com-tag-pick .com-tag-text{ display:inline-block; outline:none; }
 
       .com-tag-pick.com-picked { background: #ffeb3b; }
       .com-tag-pick.com-weak.com-picked { background: #ffd54f; }
-
-      .com-tag-pick.com-editing{
-        border-color: rgba(120, 80, 160, .75) !important;
-        box-shadow: 0 0 0 2px rgba(120, 80, 160, .20) !important;
-        background: rgba(120, 80, 160, .06);
-        outline: none;
-      }
 
       .com-hidden-store{ display:none !important; }
 
@@ -433,65 +395,46 @@ function ensureArtifactsTab(app, html, actor) {
     `);
   }
 
-  function placeCaretAtEnd(el) {
-    try {
-      const range = document.createRange();
-      range.selectNodeContents(el);
-      range.collapse(false);
-      const sel = window.getSelection();
-      sel.removeAllRanges();
-      sel.addRange(range);
-    } catch (_) {}
+  function applyCardMode($section, { sheetUnlocked, editOn }) {
+    // Name
+    $section.find(".com-name-display").toggle(!editOn);
+    $section.find(".com-name-input").toggle(editOn).prop("disabled", !editOn);
+
+    // Tags: show only filled in non-edit; show all in edit with (empty)
+    $section.find(".com-tag-pick").each((_, el) => {
+      const $tag = $(el);
+      const key = el.dataset.pick;
+      const isEmpty = (($tag.find(".com-tag-text").text() ?? "").trim() === "" || ($tag.find(".com-tag-text").text() ?? "").trim() === "(empty)");
+      $tag.toggle(editOn || !isEmpty);
+
+      $tag.toggleClass("com-pickable", !editOn);
+      $tag.toggleClass("com-editable", editOn);
+
+      // disable contenteditable when not editing
+      const txtEl = $tag.find(".com-tag-text")[0];
+      if (txtEl) txtEl.contentEditable = editOn ? "true" : "false";
+      if (!editOn) $tag.removeClass("com-editing");
+    });
+
+    // Image clickable only when sheet is unlocked AND editOn
+    const $img = $section.find(".com-artifact-img");
+    $img.toggleClass("com-img-clickable", !!(sheetUnlocked && editOn));
+    $img.toggleClass("com-img-disabled", !(sheetUnlocked && editOn));
+
+    // Edit button only usable if sheet unlocked
+    const $btn = $section.find("button.com-edit-toggle");
+    $btn.prop("disabled", !sheetUnlocked);
+    $btn.attr("aria-pressed", editOn ? "true" : "false");
+    $btn.find(".com-edit-label").text(editOn ? "Done" : "Edit");
   }
 
-  function startInlineEditOnTag($tag, editable) {
-    if (!editable) return;
-
-    const $row = $tag.closest(".tag-row");
-    const $store = $row.find("input.com-hidden-store");
-    const stored = (($store.val() ?? "").trim());
-
-    $tag.addClass("com-editing");
-
-    // Only the text should be edited (not the icon)
-    const $txt = $tag.find(".com-tag-text");
-    const cur = (($txt.text() ?? "").trim());
-    if (!cur || cur === "(empty)") $txt.text(stored || "");
-
-    const el = $tag[0];
-    el.contentEditable = "true";
-    el.focus();
-
-    // Try to place caret in the text span
-    placeCaretAtEnd($txt[0] ?? el);
-  }
-
-  function cancelInlineEditOnTag($tag) {
-    const $row = $tag.closest(".tag-row");
-    const $store = $row.find("input.com-hidden-store");
-    const v = (($store.val() ?? "").trim());
-
-    $tag.find(".com-tag-text").text(v || "(empty)");
-    $tag[0].contentEditable = "false";
-    $tag.removeClass("com-editing");
-    $tag.attr("data-empty", v ? "0" : "1");
-  }
-
-  function commitInlineEditOnTag($tag) {
-    const $row = $tag.closest(".tag-row");
-    const $store = $row.find("input.com-hidden-store");
-
-    const raw = (($tag.find(".com-tag-text").text() ?? "").trim());
-    const val = (raw === "(empty)") ? "" : raw;
-
-    $store.val(val);
-    $store.trigger("change");
-
-    $tag.find(".com-tag-text").text(val || "(empty)");
-    $tag.attr("data-empty", val ? "0" : "1");
-
-    $tag[0].contentEditable = "false";
-    $tag.removeClass("com-editing");
+  function syncAllCardModes($grid) {
+    const sheetUnlocked = isSheetUnlocked(html);
+    $grid.find(".com-artifact").each((_, sec) => {
+      const idx = Number(sec.dataset.idx);
+      const editOn = !!app._comArtifactEdit?.[idx];
+      applyCardMode($(sec), { sheetUnlocked, editOn });
+    });
   }
 
   (async () => {
@@ -500,18 +443,14 @@ function ensureArtifactsTab(app, html, actor) {
 
     const renderTagRow = ({ pickKey, isWeak, field, value, iconClass }) => {
       const label = ((value ?? "").trim());
-      const hasValue = !!label;
-
+      const shown = label || "(empty)";
       return `
         <div class="tag-row" data-field="${field}">
-          <span class="com-tag-pick ${isWeak ? "com-weak" : ""}"
-                data-pick="${pickKey}"
-                data-empty="${hasValue ? "0" : "1"}"
-                title="${hasValue ? "" : "Double-click to edit (when unlocked)"}">
+          <span class="com-tag-pick ${isWeak ? "com-weak" : ""}" data-pick="${pickKey}">
             <i class="fas ${iconClass} com-tag-icon"></i>
-            <span class="com-tag-text">${Handlebars.escapeExpression(hasValue ? label : "(empty)")}</span>
+            <span class="com-tag-text">${Handlebars.escapeExpression(shown)}</span>
           </span>
-          <input class="com-editor-only com-hidden-store" type="text" data-field="${field}" value="${Handlebars.escapeExpression(value ?? "")}" />
+          <input class="com-hidden-store" type="text" data-field="${field}" value="${Handlebars.escapeExpression(label)}" />
         </div>
       `;
     };
@@ -519,30 +458,36 @@ function ensureArtifactsTab(app, html, actor) {
     const renderSlot = (a, idx) => {
       const name = ((a.name ?? "").trim()) || `Artifact ${idx + 1}`;
       const imgStyle = a.img ? `style="background-image:url('${a.img.replace(/'/g, "%27")}')"` : "";
+      const hasImg = !!(a.img ?? "").trim();
 
-      // In edit mode we show the input; in locked mode we show the purple display name.
-      // setArtifactsEditable() will toggle visibility appropriately.
       return `
         <section class="com-artifact" data-idx="${idx}">
+          <div class="com-topbar">
+            <button type="button" class="com-edit-toggle" data-idx="${idx}">
+              <i class="fas fa-pen"></i> <span class="com-edit-label">Edit</span>
+            </button>
+          </div>
+
           <div class="com-center">
             <div class="com-name-display">${Handlebars.escapeExpression(name)}</div>
-            <input class="com-editor-only com-name-input" type="text" data-field="name" value="${Handlebars.escapeExpression(a.name ?? "")}" />
+            <input class="com-name-input" type="text" data-field="name" value="${Handlebars.escapeExpression(a.name ?? "")}" />
+
             <div class="com-artifact-img" data-action="pick-image" ${imgStyle}>
-              ${a.img ? "" : `<i class="fas fa-image com-img-ph"></i>`}
+              ${hasImg ? "" : `<i class="fas fa-image com-img-ph"></i>`}
             </div>
 
-            <div class="com-tag-box com-tag-box-power">
-              <div class="com-tag-box-title">Power Tags (click to mark)</div>
+            <div class="com-tag-box">
+              <div class="com-tag-box-title">Power Tags</div>
               ${renderTagRow({ pickKey: `a${idx}.p0`, isWeak: false, field: "power.0.name", value: a.power?.[0]?.name ?? "", iconClass: "fa-bolt" })}
               ${renderTagRow({ pickKey: `a${idx}.p1`, isWeak: false, field: "power.1.name", value: a.power?.[1]?.name ?? "", iconClass: "fa-bolt" })}
             </div>
 
-            <div class="com-tag-box com-tag-box-weak">
-              <div class="com-tag-box-title">Weakness Tag (click to mark)</div>
+            <div class="com-tag-box">
+              <div class="com-tag-box-title">Weakness Tag</div>
               ${renderTagRow({ pickKey: `a${idx}.w`, isWeak: true, field: "weakness.name", value: a.weakness?.name ?? "", iconClass: "fa-angle-double-down" })}
             </div>
 
-            <div class="hint">Click tag names to highlight. Highlighted tags appear in Make Roll for MC approval.</div>
+            <div class="hint">Select tags when not editing. Edit tag text only in Edit mode.</div>
           </div>
         </section>
       `;
@@ -557,74 +502,96 @@ function ensureArtifactsTab(app, html, actor) {
       if (s.has(key)) $(el).addClass("com-picked");
     });
 
-    // CLICK = select/deselect (always, but only for visible tags)
-    grid.off("click.comArtifactsPick").on("click.comArtifactsPick", ".com-tag-pick", (ev) => {
-      const $tag = $(ev.currentTarget);
+    // Initial mode application
+    syncAllCardModes(grid);
 
-      // If dblclick just fired, skip the click toggle once
-      if ($tag.data("comaSkipClick")) {
-        $tag.data("comaSkipClick", false);
-        return;
+    // Keep modes in sync when sheet lock changes
+    if (!app._comLockObserverInstalled) {
+      app._comLockObserverInstalled = true;
+      const root = html?.[0];
+      if (root) {
+        const obs = new MutationObserver(() => {
+          try { syncAllCardModes(grid); } catch (_) {}
+        });
+        obs.observe(root, { attributes: true, childList: true, subtree: true });
+        app._comLockObserver = obs;
       }
+    }
 
-      // If locked and tag is empty (should be hidden anyway), ignore
-      const editable = isSheetEditable(html);
-      if (!editable && $tag.attr("data-empty") === "1") return;
-
-      // If editing, do not toggle selection
-      if ($tag.hasClass("com-editing")) return;
-
-      const key = ev.currentTarget.dataset.pick;
-      const set = toggleSel(actor.id, key);
-      $tag.toggleClass("com-picked", set.has(key));
-    });
-
-    // DBLCLICK = edit tag text (ONLY when unlocked)
-    grid.off("dblclick.comArtifactsEdit").on("dblclick.comArtifactsEdit", ".com-tag-pick", (ev) => {
+    // Toggle edit per artifact (one button per card)
+    grid.off("click.comArtifactsToggleEdit").on("click.comArtifactsToggleEdit", "button.com-edit-toggle", (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
 
-      const $tag = $(ev.currentTarget);
-      $tag.data("comaSkipClick", true); // prevent double-click from toggling selection
+      const sheetUnlocked = isSheetUnlocked(html);
+      if (!sheetUnlocked) return;
 
-      const editable = isSheetEditable(html);
-      if (!editable) return;
+      const idx = Number(ev.currentTarget.dataset.idx);
+      app._comArtifactEdit[idx] = !app._comArtifactEdit[idx];
 
-      startInlineEditOnTag($tag, true);
+      // If turning OFF edit, commit name + tags by triggering change
+      const $sec = $(ev.currentTarget).closest(".com-artifact");
+      if (!app._comArtifactEdit[idx]) {
+        // commit name
+        const $name = $sec.find('input.com-name-input[data-field="name"]');
+        if ($name.length) $name.trigger("change");
+
+        // commit all tag stores
+        $sec.find("input.com-hidden-store[data-field]").each((_, inp) => $(inp).trigger("change"));
+      }
+
+      syncAllCardModes(grid);
     });
 
-    // Key handling while editing
-    grid.off("keydown.comArtifactsInline").on("keydown.comArtifactsInline", ".com-tag-pick.com-editing", (ev) => {
-      const $tag = $(ev.currentTarget);
+    // In non-edit mode: click tags to select/deselect. In edit mode: do nothing (no selecting).
+    grid.off("click.comArtifactsPick").on("click.comArtifactsPick", ".com-tag-pick", (ev) => {
+      const $sec = $(ev.currentTarget).closest(".com-artifact");
+      const idx = Number($sec[0]?.dataset?.idx ?? -1);
+      const editOn = !!app._comArtifactEdit?.[idx];
+
+      if (editOn) return; // selection only when NOT editing
+
+      const key = ev.currentTarget.dataset.pick;
+      const set = toggleSel(actor.id, key);
+      $(ev.currentTarget).toggleClass("com-picked", set.has(key));
+    });
+
+    // Edit mode: typing directly edits the visible span; we mirror into hidden input on blur/enter.
+    function mirrorTagToStore($tag) {
+      const $sec = $tag.closest(".com-artifact");
+      const field = $tag.closest(".tag-row")?.attr("data-field");
+      if (!field) return;
+
+      const text = (($tag.find(".com-tag-text").text() ?? "").trim());
+      const val = (text === "(empty)") ? "" : text;
+
+      const $store = $sec.find(`input.com-hidden-store[data-field="${field}"]`);
+      if ($store.length) {
+        $store.val(val);
+        $store.trigger("change");
+      }
+    }
+
+    grid.off("keydown.comArtifactsTagEdit").on("keydown.comArtifactsTagEdit", ".com-tag-pick.com-editable .com-tag-text", (ev) => {
+      // Only in edit mode
+      const $sec = $(ev.currentTarget).closest(".com-artifact");
+      const idx = Number($sec[0]?.dataset?.idx ?? -1);
+      const editOn = !!app._comArtifactEdit?.[idx];
+      if (!editOn) return;
 
       if (ev.key === "Enter") {
         ev.preventDefault();
         ev.stopPropagation();
-        commitInlineEditOnTag($tag);
-        const editable = isSheetEditable(html);
-        setArtifactsEditable(html, editable);
-        return;
-      }
-
-      if (ev.key === "Escape") {
-        ev.preventDefault();
-        ev.stopPropagation();
-        cancelInlineEditOnTag($tag);
-        const editable = isSheetEditable(html);
-        setArtifactsEditable(html, editable);
-        return;
+        ev.currentTarget.blur();
       }
     });
 
-    // Blur saves
-    grid.off("blur.comArtifactsInline").on("blur.comArtifactsInline", ".com-tag-pick.com-editing", (ev) => {
-      const $tag = $(ev.currentTarget);
-      commitInlineEditOnTag($tag);
-      const editable = isSheetEditable(html);
-      setArtifactsEditable(html, editable);
+    grid.off("blur.comArtifactsTagEdit").on("blur.comArtifactsTagEdit", ".com-tag-pick.com-editable .com-tag-text", (ev) => {
+      const $tag = $(ev.currentTarget).closest(".com-tag-pick");
+      mirrorTagToStore($tag);
     });
 
-    // Save changes (name + tags via hidden stores)
+    // Save changes (name + tag stores)
     grid.off("change.comArtifacts").on("change.comArtifacts", "input", async (ev) => {
       const tab = getActiveTab(html) || MODULE_ID;
       app._comLastTab = tab;
@@ -635,47 +602,36 @@ function ensureArtifactsTab(app, html, actor) {
       if (!field) return;
 
       const artifacts2 = await getArtifacts(actor);
+
       const path = field.split(".");
       let ref = artifacts2[idx];
       for (let i = 0; i < path.length - 1; i++) ref = ref[path[i]];
       const lastKey = path[path.length - 1];
       ref[lastKey] = ev.currentTarget.value;
 
-      const $section = $(section);
-
-      // Update visible name (locked display) immediately
+      // update visible name display immediately
       if (field === "name") {
         const v = (ev.currentTarget.value ?? "").trim();
-        $section.find(".com-name-display").text(v || `Artifact ${idx + 1}`);
+        $(section).find(".com-name-display").text(v || `Artifact ${idx + 1}`);
       }
-
-      // Update visible tag text immediately (keeps icons)
-      if (field === "power.0.name") $section.find(`.com-tag-pick[data-pick="a${idx}.p0"] .com-tag-text`).text((ev.currentTarget.value ?? "").trim() || "(empty)");
-      if (field === "power.1.name") $section.find(`.com-tag-pick[data-pick="a${idx}.p1"] .com-tag-text`).text((ev.currentTarget.value ?? "").trim() || "(empty)");
-      if (field === "weakness.name") $section.find(`.com-tag-pick[data-pick="a${idx}.w"] .com-tag-text`).text((ev.currentTarget.value ?? "").trim() || "(empty)");
-
-      // Also refresh empty flags
-      if (field === "power.0.name") $section.find(`.com-tag-pick[data-pick="a${idx}.p0"]`).attr("data-empty", ((ev.currentTarget.value ?? "").trim() ? "0" : "1"));
-      if (field === "power.1.name") $section.find(`.com-tag-pick[data-pick="a${idx}.p1"]`).attr("data-empty", ((ev.currentTarget.value ?? "").trim() ? "0" : "1"));
-      if (field === "weakness.name") $section.find(`.com-tag-pick[data-pick="a${idx}.w"]`).attr("data-empty", ((ev.currentTarget.value ?? "").trim() ? "0" : "1"));
 
       await setArtifacts(actor, artifacts2);
       forceActivateTab(app, app._comLastTab);
-
-      const editable = isSheetEditable(html);
-      setArtifactsEditable(html, editable);
+      syncAllCardModes(grid);
     });
 
-    // Image pick: click on the big square (ONLY when unlocked)
+    // Image pick: click big square ONLY when sheet unlocked AND edit mode for that card
     grid.off("click.comArtifactsImg").on("click.comArtifactsImg", ".com-artifact-img[data-action='pick-image']", async (ev) => {
-      const editable = isSheetEditable(html);
-      if (!editable) return;
+      const $sec = $(ev.currentTarget).closest(".com-artifact");
+      const idx = Number($sec[0]?.dataset?.idx ?? -1);
+
+      const sheetUnlocked = isSheetUnlocked(html);
+      const editOn = !!app._comArtifactEdit?.[idx];
+      if (!sheetUnlocked || !editOn) return;
 
       const tab = getActiveTab(html) || MODULE_ID;
       app._comLastTab = tab;
 
-      const section = ev.currentTarget.closest(".com-artifact");
-      const idx = Number(section.dataset.idx);
       const artifacts2 = await getArtifacts(actor);
 
       new FilePicker({
@@ -689,10 +645,6 @@ function ensureArtifactsTab(app, html, actor) {
         }
       }).browse();
     });
-
-    const editable = isSheetEditable(html);
-    setArtifactsEditable(html, editable);
-    installLockObserver(app, html);
   })();
 }
 
@@ -706,12 +658,7 @@ Hooks.on("renderActorSheet", (app, html) => {
   if (tab) app._comLastTab = tab;
 
   ensureArtifactsTab(app, $html, actor);
-
   forceActivateTab(app, app._comLastTab);
-
-  const editable = isSheetEditable($html);
-  setArtifactsEditable($html, editable);
-  installLockObserver(app, $html);
 });
 
 /* =====================================================================================
