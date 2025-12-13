@@ -184,12 +184,12 @@ async function comaSendGMApprovalChat(msg) {
     </div>
   `;
 
-  const recipients = ChatMessage.getWhisperRecipients("GM") ?? [];
+  const recipients = game.users.filter(u => u.isGM).map(u => u.id);
   if (!recipients.length) return;
 
   await ChatMessage.create({
     content,
-    whisper: recipients.map(u => u.id),
+    whisper: recipients,
     flags: {
       [MODULE_ID]: {
         type: "coma-approval",
