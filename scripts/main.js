@@ -231,12 +231,10 @@ function isSheetUnlocked(html) {
 }
 
 /* =====================================================================================
- * SHEET UI: ARTIFACTS TAB (safe: no MutationObserver, no contentEditable)
+ * SHEET UI: ARTIFACTS TAB (NO REFRESH when entering edit; only save on exit)
  * ===================================================================================== */
 function ensureArtifactsTab(app, html, actor) {
   if (!actor?.testUserPermission(game.user, "OWNER")) return;
-
-  app._comArtifactsCardEdit ??= [false, false];
 
   if (!document.getElementById("com-artifacts-inline-style")) {
     const style = document.createElement("style");
@@ -249,14 +247,14 @@ function ensureArtifactsTab(app, html, actor) {
       .com-edit-toggle{
         background: rgba(120, 80, 160, .12);
         border: 1px solid rgba(120, 80, 160, .55);
-        border-radius: 8px;
-        padding: 3px 10px;
+        border-radius: 10px;
+        width: 36px;
+        height: 24px;
         cursor:pointer;
-        font-size: 12px;
-        color: var(--color-text-hyperlink);
         display:inline-flex;
         align-items:center;
-        gap:6px;
+        justify-content:center;
+        color: var(--color-text-hyperlink); /* keep purple-ish system hyperlink color */
       }
       .com-edit-toggle[disabled]{ opacity:.55; cursor:default; }
 
@@ -336,11 +334,15 @@ function ensureArtifactsTab(app, html, actor) {
       .com-tag-pill.com-picked { background: #ffeb3b; }
       .com-tag-pill.com-weak.com-picked { background: #ffd54f; }
 
+      .com-view-only{ display: block; }
+      .com-edit-only{ display: none; }
+      .com-artifact.com-editing .com-view-only{ display:none; }
+      .com-artifact.com-editing .com-edit-only{ display:block; }
+
       .com-edit-fields{ width: 100%; box-sizing:border-box; display:flex; flex-direction:column; gap:8px; }
       .com-edit-fields label{ font-size: 12px; opacity:.85; }
       .com-edit-fields input{ width: 100%; max-width: 100%; box-sizing:border-box; }
 
-      /* prevent focus outlines from “spilling” outside */
       .com-edit-fields input:focus, .com-name-input:focus{
         outline: none;
         box-shadow: 0 0 0 2px rgba(120, 80, 160, .25);
@@ -351,7 +353,6 @@ function ensureArtifactsTab(app, html, actor) {
     document.head.appendChild(style);
   }
 
-  // Ensure tab exists
   const nav = html.find("nav.sheet-tabs, nav.tabs");
   if (!nav.length) return;
 
@@ -370,7 +371,8 @@ function ensureArtifactsTab(app, html, actor) {
     `);
   }
 
-  // Safe re-render when clicking the sheet lock button
+  // Optional: if they click the sheet lock button, we re-render so the edit buttons enable/disable correctly.
+  // (This is separate from your artifact edit toggle; it does not fire when you click the artifact edit toggle.)
   try {
     if (!app._comArtifactsLockHooked) {
       app._comArtifactsLockHooked = true;
@@ -385,76 +387,78 @@ function ensureArtifactsTab(app, html, actor) {
     const grid = body.find(`.tab[data-tab="${MODULE_ID}"] .com-artifacts-grid`);
     const sheetUnlocked = isSheetUnlocked(html);
 
-    const renderCard = (a, idx) => {
-      const editOn = !!app._comArtifactsCardEdit[idx];
-      const nameDisplay = ((a.name ?? "").trim()) || `Artifact ${idx + 1}`;
-      const imgStyle = a.img ? `style="background-image:url('${a.img.replace(/'/g, "%27")}')"` : "";
-      const hasImg = !!(a.img ?? "").trim();
+    const pill = (key, txt, isWeak, iconClass) => `
+      <div class="com-tag-pill ${isWeak ? "com-weak" : ""}" data-pick="${key}">
+        <i class="fas ${iconClass}"></i>
+        <span class="com-pill-text">${Handlebars.escapeExpression(txt)}</span>
+      </div>
+    `;
 
+    const renderCard = (a, idx) => {
+      const nameDisplay = ((a.name ?? "").trim()) || `Artifact ${idx + 1}`;
       const p0 = (a.power?.[0]?.name ?? "").trim();
       const p1 = (a.power?.[1]?.name ?? "").trim();
       const w  = (a.weakness?.name ?? "").trim();
 
-      const pill = (key, txt, isWeak, iconClass) => `
-        <div class="com-tag-pill ${isWeak ? "com-weak" : ""}" data-pick="${key}">
-          <i class="fas ${iconClass}"></i>
-          <span>${Handlebars.escapeExpression(txt)}</span>
-        </div>
-      `;
-
-      const powerEditFields = `
-        <div class="com-edit-fields">
-          <label>Power Tag 1</label>
-          <input type="text" data-field="power.0.name" value="${Handlebars.escapeExpression(p0)}">
-          <label>Power Tag 2</label>
-          <input type="text" data-field="power.1.name" value="${Handlebars.escapeExpression(p1)}">
-        </div>
-      `;
-
-      const weakEditFields = `
-        <div class="com-edit-fields">
-          <label>Weakness Tag</label>
-          <input type="text" data-field="weakness.name" value="${Handlebars.escapeExpression(w)}">
-        </div>
-      `;
+      const imgStyle = a.img ? `style="background-image:url('${a.img.replace(/'/g, "%27")}')"` : "";
+      const hasImg = !!(a.img ?? "").trim();
 
       return `
         <section class="com-artifact" data-idx="${idx}">
           <div class="com-topbar">
-            <button type="button" class="com-edit-toggle" data-idx="${idx}" ${sheetUnlocked ? "" : "disabled"}>
-              <i class="fas fa-pen"></i>
-              <span>${editOn ? "Done" : "Edit"}</span>
+            <button type="button" class="com-edit-toggle" data-idx="${idx}" ${sheetUnlocked ? "" : "disabled"} title="${sheetUnlocked ? "Toggle edit" : "Sheet is locked"}">
+              <i class="fas fa-lock"></i>
             </button>
           </div>
 
           <div class="com-center">
-            ${editOn ? `
-              <input class="com-name-input" type="text" data-field="name" value="${Handlebars.escapeExpression(a.name ?? "")}">
-            ` : `
-              <div class="com-name-display">${Handlebars.escapeExpression(nameDisplay)}</div>
-            `}
+            <div class="com-view-only">
+              <div class="com-name-display com-name-text">${Handlebars.escapeExpression(nameDisplay)}</div>
+            </div>
 
-            <div class="com-artifact-img ${sheetUnlocked && editOn ? "com-img-clickable" : "com-img-disabled"}" data-action="pick-image" ${imgStyle}>
+            <div class="com-edit-only">
+              <input class="com-name-input" type="text" data-field="name" value="${Handlebars.escapeExpression(a.name ?? "")}">
+            </div>
+
+            <div class="com-artifact-img com-img-disabled" data-action="pick-image" ${imgStyle}>
               ${hasImg ? "" : `<i class="fas fa-image com-img-ph"></i>`}
             </div>
 
             <div class="com-tag-box">
               <div class="com-tag-box-title">Power Tags</div>
-              ${editOn ? powerEditFields : `
+
+              <div class="com-view-only com-power-view">
                 ${p0 ? pill(`a${idx}.p0`, p0, false, "fa-bolt") : ""}
                 ${p1 ? pill(`a${idx}.p1`, p1, false, "fa-bolt") : ""}
                 ${(!p0 && !p1) ? `<div style="opacity:.6; text-align:center; font-size:12px;">(empty)</div>` : ""}
-              `}
+              </div>
+
+              <div class="com-edit-only com-power-edit">
+                <div class="com-edit-fields">
+                  <label>Power Tag 1</label>
+                  <input type="text" data-field="power.0.name" value="${Handlebars.escapeExpression(p0)}">
+                  <label>Power Tag 2</label>
+                  <input type="text" data-field="power.1.name" value="${Handlebars.escapeExpression(p1)}">
+                </div>
+              </div>
             </div>
 
             <div class="com-tag-box">
               <div class="com-tag-box-title">Weakness Tag</div>
-              ${editOn ? weakEditFields : `
+
+              <div class="com-view-only com-weak-view">
                 ${w ? pill(`a${idx}.w`, w, true, "fa-angle-double-down") : `<div style="opacity:.6; text-align:center; font-size:12px;">(empty)</div>`}
-              `}
+              </div>
+
+              <div class="com-edit-only com-weak-edit">
+                <div class="com-edit-fields">
+                  <label>Weakness Tag</label>
+                  <input type="text" data-field="weakness.name" value="${Handlebars.escapeExpression(w)}">
+                </div>
+              </div>
             </div>
 
-            <div class="hint">${editOn ? "Editing: update fields and click Done." : "Click tags to select/deselect."}</div>
+            <div class="hint com-hint-text">Click tags to select/deselect.</div>
           </div>
         </section>
       `;
@@ -462,70 +466,114 @@ function ensureArtifactsTab(app, html, actor) {
 
     grid.html(artifacts.map(renderCard).join(""));
 
-    // Restore highlights on visible pills
-    const s = getSel(actor.id);
+    // restore highlight from selection
+    const sel = getSel(actor.id);
     grid.find(".com-tag-pill").each((_, el) => {
       const key = el.dataset.pick;
-      if (s.has(key)) $(el).addClass("com-picked");
+      if (sel.has(key)) $(el).addClass("com-picked");
     });
 
-    // View mode: click to select/deselect (disabled when editing that card)
+    function setCardEditing($sec, on) {
+      $sec.toggleClass("com-editing", !!on);
+
+      const $btn = $sec.find(".com-edit-toggle").first();
+      const $icon = $btn.find("i.fas").first();
+      $icon.removeClass("fa-lock fa-lock-open").addClass(on ? "fa-lock-open" : "fa-lock");
+
+      const canClickImg = on && isSheetUnlocked(html);
+      const $img = $sec.find(".com-artifact-img").first();
+      $img.toggleClass("com-img-clickable", canClickImg);
+      $img.toggleClass("com-img-disabled", !canClickImg);
+
+      const $hint = $sec.find(".com-hint-text").first();
+      $hint.text(on ? "Editing: update fields and click the lock again to save." : "Click tags to select/deselect.");
+    }
+
+    // Ensure all cards start NOT editing (no refresh needed, just DOM state)
+    grid.find(".com-artifact").each((_, el) => setCardEditing($(el), false));
+
+    // View mode: click to select/deselect (blocked in edit mode)
     grid.off("click.comArtifactsPick").on("click.comArtifactsPick", ".com-tag-pill", (ev) => {
-      const section = ev.currentTarget.closest(".com-artifact");
-      const idx = Number(section?.dataset?.idx ?? -1);
-      if (idx < 0) return;
-      if (app._comArtifactsCardEdit[idx]) return;
+      const $sec = $(ev.currentTarget).closest(".com-artifact");
+      if ($sec.hasClass("com-editing")) return;
 
       const key = ev.currentTarget.dataset.pick;
       const set = toggleSel(actor.id, key);
       $(ev.currentTarget).toggleClass("com-picked", set.has(key));
     });
 
-    // Edit toggle per card: flip state; on Done, commit inputs -> flags; then re-render
+    // Edit toggle:
+    // - First click: enter edit mode, NO sheet refresh.
+    // - Second click: save + update view DOM, still NO sheet refresh.
     grid.off("click.comArtifactsToggle").on("click.comArtifactsToggle", ".com-edit-toggle", async (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
 
       if (!isSheetUnlocked(html)) return;
 
-      const idx = Number(ev.currentTarget.dataset.idx);
-      app._comArtifactsCardEdit[idx] = !app._comArtifactsCardEdit[idx];
+      const $sec = $(ev.currentTarget).closest(".com-artifact");
+      const idx = Number($sec.data("idx"));
+      const isEditing = $sec.hasClass("com-editing");
 
-      if (!app._comArtifactsCardEdit[idx]) {
-        const $sec = $(ev.currentTarget).closest(".com-artifact");
-        const artifacts2 = await getArtifacts(actor);
-
-        const $name = $sec.find(`input[data-field="name"]`);
-        if ($name.length) artifacts2[idx].name = ($name.val() ?? "").toString();
-
-        const $p0 = $sec.find(`input[data-field="power.0.name"]`);
-        const $p1 = $sec.find(`input[data-field="power.1.name"]`);
-        const $w  = $sec.find(`input[data-field="weakness.name"]`);
-        artifacts2[idx].power[0].name = ($p0.val() ?? "").toString();
-        artifacts2[idx].power[1].name = ($p1.val() ?? "").toString();
-        artifacts2[idx].weakness.name = ($w.val() ?? "").toString();
-
-        const tab = getActiveTab(html) || MODULE_ID;
-        app._comLastTab = tab;
-
-        await setArtifacts(actor, artifacts2);
+      if (!isEditing) {
+        setCardEditing($sec, true);
+        return;
       }
 
-      app.render(false);
-      forceActivateTab(app, app._comLastTab || MODULE_ID);
-    });
+      // Leaving edit mode -> commit changes
+      const artifacts2 = await getArtifacts(actor);
 
-    // Image pick ONLY in edit mode + sheet unlocked
-    grid.off("click.comArtifactsImg").on("click.comArtifactsImg", ".com-artifact-img[data-action='pick-image']", async (ev) => {
-      const section = ev.currentTarget.closest(".com-artifact");
-      const idx = Number(section?.dataset?.idx ?? -1);
-      if (idx < 0) return;
+      const name = ($sec.find(`input[data-field="name"]`).val() ?? "").toString();
+      const p0 = ($sec.find(`input[data-field="power.0.name"]`).val() ?? "").toString();
+      const p1 = ($sec.find(`input[data-field="power.1.name"]`).val() ?? "").toString();
+      const w  = ($sec.find(`input[data-field="weakness.name"]`).val() ?? "").toString();
 
-      if (!isSheetUnlocked(html)) return;
-      if (!app._comArtifactsCardEdit[idx]) return;
+      artifacts2[idx].name = name;
+      artifacts2[idx].power[0].name = p0;
+      artifacts2[idx].power[1].name = p1;
+      artifacts2[idx].weakness.name = w;
 
       const tab = getActiveTab(html) || MODULE_ID;
       app._comLastTab = tab;
+
+      await setArtifacts(actor, artifacts2);
+
+      // Update view DOM in-place (no actor sheet refresh)
+      const dispName = (name ?? "").trim() || `Artifact ${idx + 1}`;
+      $sec.find(".com-name-text").text(dispName);
+
+      const $pView = $sec.find(".com-power-view").first();
+      $pView.empty();
+      const pp0 = (p0 ?? "").trim();
+      const pp1 = (p1 ?? "").trim();
+      if (pp0) $pView.append($(pill(`a${idx}.p0`, pp0, false, "fa-bolt")));
+      if (pp1) $pView.append($(pill(`a${idx}.p1`, pp1, false, "fa-bolt")));
+      if (!pp0 && !pp1) $pView.append($(`<div style="opacity:.6; text-align:center; font-size:12px;">(empty)</div>`));
+
+      const $wView = $sec.find(".com-weak-view").first();
+      $wView.empty();
+      const ww = (w ?? "").trim();
+      if (ww) $wView.append($(pill(`a${idx}.w`, ww, true, "fa-angle-double-down")));
+      else $wView.append($(`<div style="opacity:.6; text-align:center; font-size:12px;">(empty)</div>`));
+
+      // Re-apply selection highlight to any newly re-rendered pills inside this section
+      const s = getSel(actor.id);
+      $sec.find(".com-tag-pill").each((_, el2) => {
+        const key = el2.dataset.pick;
+        $(el2).toggleClass("com-picked", s.has(key));
+      });
+
+      setCardEditing($sec, false);
+      forceActivateTab(app, app._comLastTab || MODULE_ID);
+    });
+
+    // Image pick only in edit mode + sheet unlocked (still no refresh)
+    grid.off("click.comArtifactsImg").on("click.comArtifactsImg", ".com-artifact-img[data-action='pick-image']", async (ev) => {
+      const $sec = $(ev.currentTarget).closest(".com-artifact");
+      const idx = Number($sec.data("idx"));
+
+      if (!isSheetUnlocked(html)) return;
+      if (!$sec.hasClass("com-editing")) return;
 
       const artifacts2 = await getArtifacts(actor);
 
@@ -535,8 +583,12 @@ function ensureArtifactsTab(app, html, actor) {
         callback: async (path) => {
           artifacts2[idx].img = path;
           await setArtifacts(actor, artifacts2);
-          app.render(false);
-          forceActivateTab(app, app._comLastTab);
+
+          // Update image in-place (no refresh)
+          const $img = $sec.find(".com-artifact-img").first();
+          $img.css("background-image", path ? `url('${String(path).replace(/'/g, "%27")}')` : "");
+          if (path) $img.find(".com-img-ph").remove();
+          else if (!$img.find(".com-img-ph").length) $img.append(`<i class="fas fa-image com-img-ph"></i>`);
         }
       }).browse();
     });
