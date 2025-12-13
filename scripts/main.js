@@ -167,6 +167,7 @@ function clearSelAndUnhighlight(actorId) {
 
     if (sheet?.rendered && sheet?.element) {
       const $el = sheet.element.jquery ? sheet.element : $(sheet.element);
+      $el.find(".com-tag-pill.com-picked").removeClass("com-picked");
       $el.find(".com-tag-pick.com-picked").removeClass("com-picked");
     }
   } catch (e) {
@@ -218,7 +219,7 @@ function forceActivateTab(app, tab) {
 }
 
 /* =====================================================================================
- * LOCK DETECTION (use your stable method)
+ * LOCK DETECTION
  * ===================================================================================== */
 function isSheetUnlocked(html) {
   const ref = html
@@ -235,16 +236,14 @@ function isSheetUnlocked(html) {
 function ensureArtifactsTab(app, html, actor) {
   if (!actor?.testUserPermission(game.user, "OWNER")) return;
 
-  // Per-sheet edit state: [artifact0, artifact1]
   app._comArtifactsCardEdit ??= [false, false];
 
-  // CSS once
   if (!document.getElementById("com-artifacts-inline-style")) {
     const style = document.createElement("style");
     style.id = "com-artifacts-inline-style";
     style.textContent = `
       .com-artifacts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-      .com-artifact { border: 1px solid var(--color-border-light-primary); border-radius: 10px; padding: 12px; }
+      .com-artifact { border: 1px solid var(--color-border-light-primary); border-radius: 10px; padding: 12px; box-sizing: border-box; }
       .com-topbar { display:flex; justify-content:flex-end; margin-bottom:6px; }
 
       .com-edit-toggle{
@@ -273,7 +272,7 @@ function ensureArtifactsTab(app, html, actor) {
         word-break: break-word;
         margin-top: 2px;
       }
-      .com-name-input{ width: 100%; max-width: 320px; }
+      .com-name-input{ width: 100%; max-width: 320px; box-sizing:border-box; }
 
       .com-artifact-img{
         width: 192px;
@@ -287,6 +286,7 @@ function ensureArtifactsTab(app, html, actor) {
         align-items:center;
         justify-content:center;
         user-select:none;
+        box-sizing: border-box;
       }
       .com-artifact-img.com-img-clickable{ cursor:pointer; }
       .com-artifact-img.com-img-disabled{ cursor:default; opacity:.85; }
@@ -305,6 +305,8 @@ function ensureArtifactsTab(app, html, actor) {
         border: 1px solid rgba(120, 80, 160, .55);
         background: rgba(120, 80, 160, .10);
         box-shadow: 0 0 0 2px rgba(120, 80, 160, .08);
+        box-sizing: border-box;
+        overflow: hidden;
       }
       .com-tag-box-title{
         font-size: 12px;
@@ -323,6 +325,8 @@ function ensureArtifactsTab(app, html, actor) {
         user-select:none;
         border: 1px solid transparent;
         margin: 6px 0;
+        box-sizing: border-box;
+        max-width: 100%;
       }
       .com-tag-pill:hover{
         border-color: rgba(120, 80, 160, .45);
@@ -332,9 +336,15 @@ function ensureArtifactsTab(app, html, actor) {
       .com-tag-pill.com-picked { background: #ffeb3b; }
       .com-tag-pill.com-weak.com-picked { background: #ffd54f; }
 
-      .com-edit-fields{ width:192px; display:flex; flex-direction:column; gap:8px; }
+      .com-edit-fields{ width: 100%; box-sizing:border-box; display:flex; flex-direction:column; gap:8px; }
       .com-edit-fields label{ font-size: 12px; opacity:.85; }
-      .com-edit-fields input{ width:100%; }
+      .com-edit-fields input{ width: 100%; max-width: 100%; box-sizing:border-box; }
+
+      /* prevent focus outlines from “spilling” outside */
+      .com-edit-fields input:focus, .com-name-input:focus{
+        outline: none;
+        box-shadow: 0 0 0 2px rgba(120, 80, 160, .25);
+      }
 
       .com-artifact .hint { opacity: .8; font-size: 12px; margin-top: 10px; text-align:center; }
     `;
@@ -360,8 +370,7 @@ function ensureArtifactsTab(app, html, actor) {
     `);
   }
 
-  // Attach a SAFE rerender when clicking the sheet lock button
-  // (no observers; one delayed render)
+  // Safe re-render when clicking the sheet lock button
   try {
     if (!app._comArtifactsLockHooked) {
       app._comArtifactsLockHooked = true;
@@ -386,7 +395,6 @@ function ensureArtifactsTab(app, html, actor) {
       const p1 = (a.power?.[1]?.name ?? "").trim();
       const w  = (a.weakness?.name ?? "").trim();
 
-      // View mode pills: show only non-empty
       const pill = (key, txt, isWeak, iconClass) => `
         <div class="com-tag-pill ${isWeak ? "com-weak" : ""}" data-pick="${key}">
           <i class="fas ${iconClass}"></i>
@@ -394,13 +402,17 @@ function ensureArtifactsTab(app, html, actor) {
         </div>
       `;
 
-      // Edit mode fields: inputs (no contenteditable)
-      const editFields = `
+      const powerEditFields = `
         <div class="com-edit-fields">
           <label>Power Tag 1</label>
           <input type="text" data-field="power.0.name" value="${Handlebars.escapeExpression(p0)}">
           <label>Power Tag 2</label>
           <input type="text" data-field="power.1.name" value="${Handlebars.escapeExpression(p1)}">
+        </div>
+      `;
+
+      const weakEditFields = `
+        <div class="com-edit-fields">
           <label>Weakness Tag</label>
           <input type="text" data-field="weakness.name" value="${Handlebars.escapeExpression(w)}">
         </div>
@@ -428,16 +440,18 @@ function ensureArtifactsTab(app, html, actor) {
 
             <div class="com-tag-box">
               <div class="com-tag-box-title">Power Tags</div>
-              ${editOn ? editFields : `
+              ${editOn ? powerEditFields : `
                 ${p0 ? pill(`a${idx}.p0`, p0, false, "fa-bolt") : ""}
                 ${p1 ? pill(`a${idx}.p1`, p1, false, "fa-bolt") : ""}
+                ${(!p0 && !p1) ? `<div style="opacity:.6; text-align:center; font-size:12px;">(empty)</div>` : ""}
               `}
             </div>
 
             <div class="com-tag-box">
               <div class="com-tag-box-title">Weakness Tag</div>
-              ${editOn ? "" : (w ? pill(`a${idx}.w`, w, true, "fa-angle-double-down") : "")}
-              ${editOn ? "" : (w ? "" : `<div style="opacity:.6; text-align:center; font-size:12px;">(empty)</div>`)}
+              ${editOn ? weakEditFields : `
+                ${w ? pill(`a${idx}.w`, w, true, "fa-angle-double-down") : `<div style="opacity:.6; text-align:center; font-size:12px;">(empty)</div>`}
+              `}
             </div>
 
             <div class="hint">${editOn ? "Editing: update fields and click Done." : "Click tags to select/deselect."}</div>
@@ -455,13 +469,11 @@ function ensureArtifactsTab(app, html, actor) {
       if (s.has(key)) $(el).addClass("com-picked");
     });
 
-    // View mode: click to select/deselect (disabled when edit mode is ON for that card)
+    // View mode: click to select/deselect (disabled when editing that card)
     grid.off("click.comArtifactsPick").on("click.comArtifactsPick", ".com-tag-pill", (ev) => {
       const section = ev.currentTarget.closest(".com-artifact");
       const idx = Number(section?.dataset?.idx ?? -1);
       if (idx < 0) return;
-
-      // only when NOT editing that card
       if (app._comArtifactsCardEdit[idx]) return;
 
       const key = ev.currentTarget.dataset.pick;
@@ -469,7 +481,7 @@ function ensureArtifactsTab(app, html, actor) {
       $(ev.currentTarget).toggleClass("com-picked", set.has(key));
     });
 
-    // Edit toggle per card (safe: just flip state and re-render)
+    // Edit toggle per card: flip state; on Done, commit inputs -> flags; then re-render
     grid.off("click.comArtifactsToggle").on("click.comArtifactsToggle", ".com-edit-toggle", async (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
@@ -479,16 +491,13 @@ function ensureArtifactsTab(app, html, actor) {
       const idx = Number(ev.currentTarget.dataset.idx);
       app._comArtifactsCardEdit[idx] = !app._comArtifactsCardEdit[idx];
 
-      // When turning OFF edit, we commit everything currently in inputs
       if (!app._comArtifactsCardEdit[idx]) {
         const $sec = $(ev.currentTarget).closest(".com-artifact");
         const artifacts2 = await getArtifacts(actor);
 
-        // Name
         const $name = $sec.find(`input[data-field="name"]`);
         if ($name.length) artifacts2[idx].name = ($name.val() ?? "").toString();
 
-        // Tags
         const $p0 = $sec.find(`input[data-field="power.0.name"]`);
         const $p1 = $sec.find(`input[data-field="power.1.name"]`);
         const $w  = $sec.find(`input[data-field="weakness.name"]`);
