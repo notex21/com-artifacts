@@ -198,7 +198,7 @@ async function getArtifacts(actor) {
   const data = (await actor.getFlag(MODULE_ID, "artifacts")) ?? defaultArtifacts();
   if (!Array.isArray(data) || data.length !== 2) return defaultArtifacts();
 
-  // normalize
+  // Normalize older/bad data
   for (let i = 0; i < 2; i++) {
     data[i] ??= defaultArtifacts()[i];
     data[i].name ??= `Artifact ${i + 1}`;
@@ -229,67 +229,90 @@ function forceActivateTab(app, tab) {
 }
 
 /* =====================================================================================
- * LOCK-AWARE EDITING (FIXED)
- *  - City of Mist uses <form class="... locked ..."> when sheet is locked.
+ * LOCK-AWARE EDITING (FIXED FOR CoM)
+ * CoM lock state is form.locked
  * ===================================================================================== */
-function isSheetEditable(html) {
-  const form = html.closest("form")[0] ?? html.find("form")[0];
+function findSheetForm($root) {
+  // $root is app root DIV; form is inside it.
+  const $form = $root.is("form") ? $root : $root.find("form").first();
+  return $form?.length ? $form[0] : null;
+}
+
+function isSheetEditable($root) {
+  const form = findSheetForm($root);
   if (!form) return false;
   return !form.classList.contains("locked");
 }
 
-function setArtifactsEditable(html, editable) {
-  const tab = html.find(`.sheet-body .tab[data-tab="${MODULE_ID}"]`);
+function setArtifactsEditable($root, editable) {
+  const tab = $root.find(`.sheet-body .tab[data-tab="${MODULE_ID}"]`);
   if (!tab.length) return;
 
-  // Inputs only visible/usable when unlocked
-  tab.find(".com-editable-input").prop("disabled", !editable).toggle(editable);
+  // In unlocked mode: enable inline editing + placeholders.
+  // In locked mode: disable editing, hide empty tags.
+  tab.toggleClass("com-editable", !!editable);
 
-  // Name display vs name input
+  tab.find(".com-tag-pick").each((_, el) => {
+    const $el = $(el);
+    const txt = ($el.text() ?? "").trim();
+
+    el.contentEditable = editable ? "true" : "false";
+    $el.toggleClass("com-inline-editable", !!editable);
+
+    if (!editable) {
+      // locked: empty tags hidden and never selectable
+      $el.toggle(!!txt);
+      $el.removeClass("com-editing");
+    } else {
+      // unlocked: show all lines (placeholder handles empties)
+      $el.show();
+    }
+  });
+
+  // Name input show/hide
+  tab.find(".com-name-input").prop("disabled", !editable).toggle(!!editable);
   tab.find(".com-name-display").toggle(!editable);
-  tab.find(".com-name-input-wrap").toggle(editable);
 
-  // Image pick only when unlocked
+  // Image clickable only when editable
   tab.find(".com-artifact-img").toggleClass("com-img-disabled", !editable);
 
-  // selection always allowed
+  // Always allow pointer events; logic gates in handlers
   tab.find(".com-tag-pick").css("pointer-events", "auto");
-
-  tab.css("opacity", editable ? "" : "0.95");
 }
 
-function installLockObserver(app, html) {
+function installLockObserver(app, $root) {
   if (app._comLockObserverInstalled) return;
   app._comLockObserverInstalled = true;
 
-  const root = html?.[0];
-  if (!root) return;
+  const rootEl = $root?.[0];
+  if (!rootEl) return;
 
   const obs = new MutationObserver(() => {
     try {
-      const $root = $(root);
-      const editable = isSheetEditable($root);
-      setArtifactsEditable($root, editable);
-    } catch (_) {}
+      const $r = $(rootEl);
+      const editable = isSheetEditable($r);
+      setArtifactsEditable($r, editable);
+    } catch (e) {
+      console.warn(`${MODULE_ID} | lock observer error`, e);
+    }
   });
 
-  obs.observe(root, { attributes: true, childList: true, subtree: true });
+  obs.observe(rootEl, { attributes: true, childList: true, subtree: true });
   app._comLockObserver = obs;
 }
 
 /* =====================================================================================
- * SHEET UI: ARTIFACTS TAB (NEW LAYOUT)
+ * SHEET UI: ARTIFACTS TAB (INLINE EDIT TAG LINES, NO EDIT BUTTONS)
  * ===================================================================================== */
-function ensureArtifactsTab(app, html, actor) {
+function ensureArtifactsTab(app, $root, actor) {
   if (!actor?.testUserPermission(game.user, "OWNER")) return;
 
   if (!document.getElementById("com-artifacts-inline-style")) {
     const style = document.createElement("style");
     style.id = "com-artifacts-inline-style";
     style.textContent = `
-      :root { --com-art-card: 192px; }
+      .com-artifacts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 
-      .com-artifacts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items:start; }
       .com-artifact { border: 1px solid var(--color-border-light-primary); border-radius: 10px; padding: 12px; }
       .com-artifact-inner { display:flex; flex-direction:column; align-items:center; gap:10px; }
 
@@ -301,17 +324,17 @@ function ensureArtifactsTab(app, html, actor) {
         text-align:center;
         margin-top: 2px;
       }
-      .com-name-input-wrap{ width: var(--com-art-card); }
-      .com-name-input-wrap input{
-        width:100%;
+      .com-name-input{
+        width: 100%;
         font-family: "Roboto";
         font-size: 1.15em;
+        display:none;
       }
 
-      /* Image (SQUARE FIX) */
+      /* Image */
       .com-artifact-img{
-        width: var(--com-art-card);
-        height: var(--com-art-card);
+        width: 192px;
+        height: 192px;   /* square */
         border: 1px solid var(--color-border-light-primary);
         border-radius: 10px;
         background-size: cover;
@@ -330,12 +353,12 @@ function ensureArtifactsTab(app, html, actor) {
         justify-content:center;
         opacity:.55;
         pointer-events:none;
-        font-size: 48px; /* 3x-ish */
+        font-size: 48px;
       }
       .com-artifact-img.has-image .com-img-icon{ display:none; }
 
       /* Tag blocks (same width as image) */
-      .com-tags { width: var(--com-art-card); display:flex; flex-direction:column; gap:10px; }
+      .com-tags { width: 192px; display:flex; flex-direction:column; gap:10px; }
       .com-tag-block{
         border: 1px solid var(--color-border-light-primary);
         border-radius: 8px;
@@ -353,24 +376,39 @@ function ensureArtifactsTab(app, html, actor) {
 
       .com-tag-row{ display:flex; align-items:center; gap:8px; margin:6px 0; }
       .com-tag-icon { width: 14px; text-align:center; opacity:.9; }
+
       .com-tag-pick{
         display:inline-block;
         padding:2px 8px;
         border-radius:6px;
-        cursor:pointer;
         user-select:none;
+        min-height: 20px;
+        flex: 1;
       }
+
+      /* Placeholder (only visible in unlocked mode because locked mode hides empties) */
+      .tab[data-tab="${MODULE_ID}"].com-editable .com-tag-pick:empty::before{
+        content: attr(data-placeholder);
+        opacity: .55;
+      }
+
+      /* Editable styling */
+      .tab[data-tab="${MODULE_ID}"].com-editable .com-tag-pick{
+        cursor: text;
+        border: 1px solid rgba(120, 80, 160, .25);
+        background: rgba(120, 80, 160, .03);
+      }
+      .tab[data-tab="${MODULE_ID}"]:not(.com-editable) .com-tag-pick{
+        cursor: pointer;
+        border: 1px solid transparent;
+      }
+      .tab[data-tab="${MODULE_ID}"]:not(.com-editable) .com-tag-pick:hover{
+        border-color: rgba(120, 80, 160, .45);
+        box-shadow: 0 0 0 2px rgba(120, 80, 160, .15);
+      }
+
       .com-tag-pick.com-picked { background:#ffeb3b; }
       .com-tag-pick.com-weak.com-picked { background:#ffd54f; }
-
-      /* Locked: hide empty tags */
-      .com-tag-pick:empty{ display:none; }
-
-      /* Inputs only when unlocked */
-      .com-editable-input{ display:none; }
-      .com-editable-input input{
-        width:100%;
-      }
 
       .com-hint{
         opacity:.8;
@@ -382,14 +420,14 @@ function ensureArtifactsTab(app, html, actor) {
     document.head.appendChild(style);
   }
 
-  const nav = html.find("nav.sheet-tabs, nav.tabs");
+  const nav = $root.find("nav.sheet-tabs, nav.tabs");
   if (!nav.length) return;
 
   if (nav.find(`a.item[data-tab="${MODULE_ID}"]`).length === 0) {
     nav.append(`<a class="item" data-tab="${MODULE_ID}">Artifacts</a>`);
   }
 
-  const body = html.find(".sheet-body");
+  const body = $root.find(".sheet-body");
   if (!body.length) return;
 
   if (!body.find(`.tab[data-tab="${MODULE_ID}"]`).length) {
@@ -400,26 +438,36 @@ function ensureArtifactsTab(app, html, actor) {
     `);
   }
 
+  function esc(s) { return Handlebars.escapeExpression(s ?? ""); }
+
+  // caret helper
+  function placeCaretAtEnd(el) {
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      range.collapse(false);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    } catch (_) {}
+  }
+
   (async () => {
     const artifacts = await getArtifacts(actor);
     const grid = body.find(`.tab[data-tab="${MODULE_ID}"] .com-artifacts-grid`);
-
-    const esc = (s) => Handlebars.escapeExpression(s ?? "");
 
     const renderSlot = (a, idx) => {
       const img = (a.img ?? "").trim();
       const hasImage = !!img;
       const imgStyle = hasImage ? `background-image:url('${img.replace(/'/g, "%27")}');` : "";
+
       return `
         <section class="com-artifact" data-idx="${idx}">
           <div class="com-artifact-inner">
             <div class="com-name-display">${esc(a.name ?? "")}</div>
+            <input class="com-name-input" type="text" data-field="name" value="${esc(a.name ?? "")}" />
 
-            <div class="com-name-input-wrap" style="display:none;">
-              <input class="com-editable-input" type="text" data-field="name" value="${esc(a.name ?? "")}" />
-            </div>
-
-            <div class="com-artifact-img ${hasImage ? "has-image" : ""}" style="${imgStyle}" data-img="1">
+            <div class="com-artifact-img ${hasImage ? "has-image" : ""}" style="${imgStyle}">
               <div class="com-img-icon"><i class="fas fa-image"></i></div>
             </div>
 
@@ -429,20 +477,18 @@ function ensureArtifactsTab(app, html, actor) {
 
                 <div class="com-tag-row">
                   <span class="com-tag-icon"><i class="fas fa-bolt"></i></span>
-                  <span class="com-tag-pick" data-pick="a${idx}.p0">${esc(a.power?.[0]?.name ?? "")}</span>
-                </div>
-
-                <div class="com-editable-input">
-                  <input type="text" data-field="power.0.name" value="${esc(a.power?.[0]?.name ?? "")}" />
+                  <span class="com-tag-pick"
+                        data-pick="a${idx}.p0"
+                        data-field="power.0.name"
+                        data-placeholder="Power Tag 1">${esc(a.power?.[0]?.name ?? "")}</span>
                 </div>
 
                 <div class="com-tag-row">
                   <span class="com-tag-icon"><i class="fas fa-bolt"></i></span>
-                  <span class="com-tag-pick" data-pick="a${idx}.p1">${esc(a.power?.[1]?.name ?? "")}</span>
-                </div>
-
-                <div class="com-editable-input">
-                  <input type="text" data-field="power.1.name" value="${esc(a.power?.[1]?.name ?? "")}" />
+                  <span class="com-tag-pick"
+                        data-pick="a${idx}.p1"
+                        data-field="power.1.name"
+                        data-placeholder="Power Tag 2">${esc(a.power?.[1]?.name ?? "")}</span>
                 </div>
               </div>
 
@@ -451,15 +497,14 @@ function ensureArtifactsTab(app, html, actor) {
 
                 <div class="com-tag-row">
                   <span class="com-tag-icon"><i class="fas fa-angle-double-down"></i></span>
-                  <span class="com-tag-pick com-weak" data-pick="a${idx}.w">${esc(a.weakness?.name ?? "")}</span>
-                </div>
-
-                <div class="com-editable-input">
-                  <input type="text" data-field="weakness.name" value="${esc(a.weakness?.name ?? "")}" />
+                  <span class="com-tag-pick com-weak"
+                        data-pick="a${idx}.w"
+                        data-field="weakness.name"
+                        data-placeholder="Weakness Tag">${esc(a.weakness?.name ?? "")}</span>
                 </div>
               </div>
 
-              <div class="com-hint">Locked: select/deselect tags. Unlocked: edit name, image, and tag names.</div>
+              <div class="com-hint">Locked: select/deselect tags. Unlocked: click tag text to edit.</div>
             </div>
           </div>
         </section>
@@ -468,96 +513,146 @@ function ensureArtifactsTab(app, html, actor) {
 
     grid.html(artifacts.map(renderSlot).join(""));
 
-    // Restore highlight from selection
-    const s = getSel(actor.id);
+    // restore highlight from selection
+    const selSet = getSel(actor.id);
     grid.find(".com-tag-pick").each((_, el) => {
       const key = el.dataset.pick;
-      if (key && s.has(key) && (el.textContent ?? "").trim()) $(el).addClass("com-picked");
+      const txt = (el.textContent ?? "").trim();
+      if (key && txt && selSet.has(key)) $(el).addClass("com-picked");
     });
 
-    // Click-to-highlight (works locked/unlocked)
-    grid.off("click.comArtifactsPick").on("click.comArtifactsPick", ".com-tag-pick", (ev) => {
-      const txt = (ev.currentTarget.textContent ?? "").trim();
-      if (!txt) return; // ignore empty
-      const key = ev.currentTarget.dataset.pick;
+    // CLICK behavior depends on lock state:
+    // - LOCKED: click toggles selection
+    // - UNLOCKED: click focuses for editing (NOT selectable)
+    grid.off("click.comArtifactsTag").on("click.comArtifactsTag", ".com-tag-pick", (ev) => {
+      const $appRoot = $root;
+      const editable = isSheetEditable($appRoot);
+      const el = ev.currentTarget;
+
+      if (editable) {
+        // edit mode: just focus, do not select/deselect
+        el.focus();
+        placeCaretAtEnd(el);
+        return;
+      }
+
+      // locked mode: only if has text
+      const txt = (el.textContent ?? "").trim();
+      if (!txt) return;
+
+      const key = el.dataset.pick;
       const set = toggleSel(actor.id, key);
-      $(ev.currentTarget).toggleClass("com-picked", set.has(key));
+      $(el).toggleClass("com-picked", set.has(key));
+    });
+
+    // Inline edit commit (Enter/blur), cancel (Escape)
+    grid.off("keydown.comArtifactsEdit").on("keydown.comArtifactsEdit", ".com-tag-pick", (ev) => {
+      const editable = isSheetEditable($root);
+      if (!editable) return;
+
+      const el = ev.currentTarget;
+
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        el.blur();
+        return;
+      }
+
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        // revert from stored actor data
+        const section = el.closest(".com-artifact");
+        const idx = Number(section.dataset.idx);
+        const field = el.dataset.field;
+
+        getArtifacts(actor).then((arts) => {
+          const path = field.split(".");
+          let ref = arts[idx];
+          for (let i = 0; i < path.length - 1; i++) ref = ref[path[i]];
+          const lastKey = path[path.length - 1];
+          const val = (ref?.[lastKey] ?? "").toString();
+          el.textContent = val;
+          el.blur();
+        }).catch(() => { el.blur(); });
+      }
+    });
+
+    grid.off("blur.comArtifactsEdit").on("blur.comArtifactsEdit", ".com-tag-pick", async (ev) => {
+      const editable = isSheetEditable($root);
+      if (!editable) return;
+
+      const el = ev.currentTarget;
+      const section = el.closest(".com-artifact");
+      const idx = Number(section.dataset.idx);
+      const field = el.dataset.field;
+      if (!field) return;
+
+      const newVal = (el.textContent ?? "").trim();
+
+      const arts = await getArtifacts(actor);
+      const path = field.split(".");
+      let ref = arts[idx];
+      for (let i = 0; i < path.length - 1; i++) ref = ref[path[i]];
+      const lastKey = path[path.length - 1];
+      ref[lastKey] = newVal;
+
+      await setArtifacts(actor, arts);
+
+      // If this tag was selected but cleared, unselect it
+      const key = el.dataset.pick;
+      const s = getSel(actor.id);
+      if (key && !newVal && s.has(key)) {
+        s.delete(key);
+        scheduleSaveSelection(actor.id);
+        $(el).removeClass("com-picked");
+      }
+    });
+
+    // Name edit input (only shown when unlocked)
+    grid.off("change.comArtifactsName").on("change.comArtifactsName", ".com-name-input", async (ev) => {
+      const editable = isSheetEditable($root);
+      if (!editable) return;
+
+      const input = ev.currentTarget;
+      const section = input.closest(".com-artifact");
+      const idx = Number(section.dataset.idx);
+      const newVal = (input.value ?? "").trim();
+
+      const arts = await getArtifacts(actor);
+      arts[idx].name = newVal;
+      await setArtifacts(actor, arts);
+
+      $(section).find(".com-name-display").text(newVal);
     });
 
     // Image pick ONLY when unlocked
     grid.off("click.comArtifactsImg").on("click.comArtifactsImg", ".com-artifact-img", async (ev) => {
-      const editable = isSheetEditable(html);
+      const editable = isSheetEditable($root);
       if (!editable) return;
 
-      const tab = getActiveTab(html) || MODULE_ID;
+      const tab = getActiveTab($root) || MODULE_ID;
       app._comLastTab = tab;
 
       const section = ev.currentTarget.closest(".com-artifact");
       const idx = Number(section.dataset.idx);
-      const artifacts2 = await getArtifacts(actor);
+      const arts = await getArtifacts(actor);
 
       new FilePicker({
         type: "image",
-        current: artifacts2[idx].img || "",
+        current: arts[idx].img || "",
         callback: async (path) => {
-          artifacts2[idx].img = path;
-          await setArtifacts(actor, artifacts2);
+          arts[idx].img = path;
+          await setArtifacts(actor, arts);
           app.render(false);
           forceActivateTab(app, app._comLastTab);
         }
       }).browse();
     });
 
-    // Save changes (inputs)
-    grid.off("change.comArtifacts").on("change.comArtifacts", "input[data-field]", async (ev) => {
-      const editable = isSheetEditable(html);
-      if (!editable) return;
-
-      const tab = getActiveTab(html) || MODULE_ID;
-      app._comLastTab = tab;
-
-      const section = ev.currentTarget.closest(".com-artifact");
-      const idx = Number(section.dataset.idx);
-      const field = ev.currentTarget.dataset.field;
-      if (!field) return;
-
-      const artifacts2 = await getArtifacts(actor);
-      const path = field.split(".");
-      let ref = artifacts2[idx];
-      for (let i = 0; i < path.length - 1; i++) ref = ref[path[i]];
-      const lastKey = path[path.length - 1];
-      ref[lastKey] = ev.currentTarget.value;
-
-      await setArtifacts(actor, artifacts2);
-
-      // Update visible text spans in-place
-      const $section = $(section);
-      if (field === "name") {
-        $section.find(".com-name-display").text((ev.currentTarget.value ?? "").trim());
-      }
-      if (field === "power.0.name") $section.find(`.com-tag-pick[data-pick="a${idx}.p0"]`).text((ev.currentTarget.value ?? "").trim());
-      if (field === "power.1.name") $section.find(`.com-tag-pick[data-pick="a${idx}.p1"]`).text((ev.currentTarget.value ?? "").trim());
-      if (field === "weakness.name") $section.find(`.com-tag-pick[data-pick="a${idx}.w"]`).text((ev.currentTarget.value ?? "").trim());
-
-      forceActivateTab(app, app._comLastTab);
-
-      // If a selected tag was cleared, remove highlight + selection
-      const sel = getSel(actor.id);
-      $section.find(".com-tag-pick").each((_, el) => {
-        const key = el.dataset.pick;
-        const t = (el.textContent ?? "").trim();
-        if (!t && key && sel.has(key)) {
-          sel.delete(key);
-          $(el).removeClass("com-picked");
-          scheduleSaveSelection(actor.id);
-        }
-      });
-    });
-
     // Apply lock state now + observe changes
-    const editable = isSheetEditable(html);
-    setArtifactsEditable(html, editable);
-    installLockObserver(app, html);
+    const editableNow = isSheetEditable($root);
+    setArtifactsEditable($root, editableNow);
+    installLockObserver(app, $root);
   })();
 }
 
@@ -565,18 +660,18 @@ Hooks.on("renderActorSheet", (app, html) => {
   const actor = app?.actor;
   if (!actor) return;
 
-  const $html = html?.jquery ? html : $(html);
+  const $root = html?.jquery ? html : $(html);
 
-  const tab = getActiveTab($html);
+  const tab = getActiveTab($root);
   if (tab) app._comLastTab = tab;
 
-  ensureArtifactsTab(app, $html, actor);
+  ensureArtifactsTab(app, $root, actor);
 
   forceActivateTab(app, app._comLastTab);
 
-  const editable = isSheetEditable($html);
-  setArtifactsEditable($html, editable);
-  installLockObserver(app, $html);
+  const editable = isSheetEditable($root);
+  setArtifactsEditable($root, editable);
+  installLockObserver(app, $root);
 });
 
 /* =====================================================================================
@@ -715,9 +810,14 @@ Hooks.on("renderRollDialog", async (app, html) => {
       $confirmBtn.off("click.comArtifactsClearOnConfirm").on("click.comArtifactsClearOnConfirm", () => {
         app._comArtifactsConfirmed = true;
 
-        // Defer to survive CoM re-render cycles
-        setTimeout(() => { try { clearSelAndUnhighlight(actor.id); } catch (_) {} }, 0);
-        setTimeout(() => { try { clearSelAndUnhighlight(actor.id); } catch (_) {} }, 250);
+        // Defer to next tick (and a short follow-up) to survive CoM re-render cycles.
+        setTimeout(() => {
+          try { clearSelAndUnhighlight(actor.id); } catch (_) {}
+        }, 0);
+
+        setTimeout(() => {
+          try { clearSelAndUnhighlight(actor.id); } catch (_) {}
+        }, 250);
       });
     }
     // ========================================================================
@@ -729,11 +829,19 @@ Hooks.on("renderRollDialog", async (app, html) => {
 
 /* =====================================================================================
  * CLEANUP + FINAL CLEAR ON DIALOG CLOSE (only if confirmed)
+ * ALSO disconnect MutationObserver to prevent crashes on rerender/close.
  * ===================================================================================== */
 Hooks.on("closeApplication", (app) => {
   try {
     // GM mirror cleanup map
     if (app?._comaRequestId) globalThis._comaOpenRollDialogs.delete(app._comaRequestId);
+
+    // Disconnect lock observer (prevents crashes on close / rerender)
+    if (app?._comLockObserver) {
+      try { app._comLockObserver.disconnect(); } catch (_) {}
+      app._comLockObserver = null;
+      app._comLockObserverInstalled = false;
+    }
 
     // If this was a RollDialog and player confirmed, clear again (final guarantee)
     if (app?._comArtifactsConfirmed && app?._comArtifactsActorId) {
